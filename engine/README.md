@@ -7,7 +7,7 @@ el seguimiento del pipeline de ventas, y mide efectividad por segmento.
 
 Este README cubre el setup del **backend** (FastAPI + PostgreSQL +
 SQLAlchemy). El frontend (Next.js/TypeScript) vive en la carpeta hermana
-`frontend/` — **no dentro de `backend/`**. Ver su propio README ahí.
+`frontend/` — **no dentro de `engine/`**. Ver su propio README ahí.
 
 ## Requisitos
 
@@ -20,19 +20,19 @@ SQLAlchemy). El frontend (Next.js/TypeScript) vive en la carpeta hermana
 Todo lo de este README es 100% gratis, sin tarjeta de crédito en ningún
 paso.
 
-## 1. Ubicarte en la carpeta backend
+## 1. Ubicarte en la carpeta engine
 
-Todos los comandos de este README se corren **desde dentro de `backend/`**,
+Todos los comandos de este README se corren **desde dentro de `engine/`**,
 no desde la raíz del proyecto:
 
 ```powershell
-cd backend
+cd engine
 ```
 
 ## 2. Levantar Postgres con Docker Compose
 
 Abre Docker Desktop primero y espera a que termine de cargar (la ballena 🐳
-en la barra de tareas debe dejar de animarse). Luego, desde `backend/`:
+en la barra de tareas debe dejar de animarse). Luego, desde `engine/`:
 
 ```powershell
 docker compose up -d
@@ -53,7 +53,7 @@ Deberías ver el servicio `postgres` en estado `healthy`.
 
 ## 3. Crear el entorno virtual e instalar dependencias
 
-En Windows/PowerShell, desde `backend/`:
+En Windows/PowerShell, desde `engine/`:
 
 ```powershell
 py -m venv venv
