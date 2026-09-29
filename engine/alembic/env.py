@@ -7,8 +7,8 @@ from sqlalchemy import pool
 
 from alembic import context
 
-# Permite importar los módulos de backend/ (database/, etc) cuando Alembic
-# corre desde la carpeta backend/.
+# Permite importar los módulos de engine/ (database/, etc) cuando Alembic
+# corre desde la carpeta engine/.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.config import settings  # noqa: E402
