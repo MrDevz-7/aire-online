@@ -1,0 +1,49 @@
+# Docker Compose para el entorno de DESARROLLO LOCAL de AirE_Online.
+#
+# Levanta un único servicio: Postgres. El engine (FastAPI) se corre
+# fuera de Docker durante el desarrollo, con el venv, y se conecta acá.
+#
+# Vive en la raíz del monorepo porque la base de datos es infraestructura
+# compartida del proyecto, no un detalle interno de /engine.
+#
+# Uso (desde la raíz del repo):
+#   docker compose up -d        # levanta Postgres
+#   docker compose ps           # estado (debe decir "healthy")
+#   docker compose down         # apaga y borra el CONTENEDOR (los datos quedan)
+#   NUNCA usar `down -v` salvo que quieras borrar la base a propósito.
+
+# Fija el nombre del proyecto Compose. Sin esto Compose usaría el nombre
+# de la carpeta; con esto, el volumen se llama siempre aire_online_pgdata.
+name: aire_online
+
+services:
+  postgres:
+    # Misma versión mayor que usa Supabase por defecto (Postgres 17).
+    # No subir a una mayor más nueva que la de Supabase.
+    image: postgres:17
+    container_name: aire_online_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aire_online
+      # Contraseña de DESARROLLO LOCAL. Se puede sobreescribir con la
+      # variable de entorno POSTGRES_PASSWORD (o un .env en la raíz, que
+      # está en .gitignore). Si la cambiás, DATABASE_URL debe coincidir.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aire_online_dev}
+      POSTGRES_DB: aire_online
+    ports:
+      # 127.0.0.1: solo tu propia PC puede conectarse. Sin ese prefijo,
+      # Docker publica en 0.0.0.0 y otras máquinas de tu red podrían llegar.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      # Volumen nombrado: los datos viven fuera del contenedor y
+      # sobreviven a `docker compose down` y a recrear el contenedor.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aire_online -d aire_online"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  # Nombre final en Docker: aire_online_pgdata (proyecto + clave).
+  pgdata:
