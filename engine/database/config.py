@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     # aire_online). En cualquier otro entorno se pisa con la variable
     # de entorno DATABASE_URL.
     DATABASE_URL: str = "postgresql+psycopg2://aire_online:aire_online_dev@localhost:5432/aire_online"
-    OSM_CONTACT_EMAIL: str = ""
     GEMINI_API_KEYS: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
     ENVIRONMENT: str = "development"
