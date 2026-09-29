@@ -28,9 +28,28 @@ class Caja(NamedTuple):
 BBOX_COLOMBIA = Caja(oeste=-79.0, sur=-4.3, este=-66.8, norte=13.5)
 
 
+def dividir_en_cuadrantes(caja: Caja) -> list[Caja]:
+    """Parte una caja en 4 (SO, SE, NO, NE) por su centro."""
+    lat_c, lon_c = (caja.sur + caja.norte) / 2, (caja.oeste + caja.este) / 2
+    return [
+        Caja(oeste=caja.oeste, sur=caja.sur, este=lon_c, norte=lat_c),
+        Caja(oeste=lon_c, sur=caja.sur, este=caja.este, norte=lat_c),
+        Caja(oeste=caja.oeste, sur=lat_c, este=lon_c, norte=caja.norte),
+        Caja(oeste=lon_c, sur=lat_c, este=caja.este, norte=caja.norte),
+    ]
+
+
 def bbox_openaq(caja: Caja = BBOX_COLOMBIA) -> str:
     """OpenAQ v3: bbox = 'min X, min Y, max X, max Y' = oeste,sur,este,norte."""
     return f"{caja.oeste},{caja.sur},{caja.este},{caja.norte}"
+
+
+def latlng_aqicn(caja: Caja = BBOX_COLOMBIA) -> str:
+    """AQICN /map/bounds: latlng = 'lat1,lng1,lat2,lng2' = sur,oeste,norte,este.
+
+    Ojo: es el orden OPUESTO al de OpenAQ (que va X,Y = lon,lat).
+    """
+    return f"{caja.sur},{caja.oeste},{caja.norte},{caja.este}"
 
 
 def dentro_de_caja(latitud: float, longitud: float, caja: Caja = BBOX_COLOMBIA) -> bool:

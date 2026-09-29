@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # crearse y falla con un mensaje claro si falta.
     OPENAQ_API_KEY: str = ""
 
+    # AQICN / WAQI (M3). Igual que la anterior: vacía por defecto y validada
+    # por el cliente al crearse.
+    AQICN_TOKEN: str = ""
+
     GEMINI_API_KEYS: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
     ENVIRONMENT: str = "development"

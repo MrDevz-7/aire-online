@@ -18,6 +18,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 
+# Política común a todas las fuentes: una estación cuyo último dato es más
+# viejo que esto se registra como inactiva (activa=False) y no se le piden
+# lecturas. Se reevalúa en cada corrida, así que una estación que reviva se
+# detecta sola. Vive acá, y no en cada cliente, para que las fuentes no
+# puedan divergir.
+VENTANA_ACTIVIDAD_DIAS = 7
+
+
 @dataclass(frozen=True)
 class LecturaNormalizada:
     contaminante: str  # pm25 | pm10 | o3 | no2 | so2 | co | aqi

@@ -48,6 +48,7 @@ import httpx
 from database.config import settings
 from sources.geo import BBOX_COLOMBIA, bbox_openaq, dentro_de_caja
 from sources.tipos import (
+    VENTANA_ACTIVIDAD_DIAS,
     EstacionNormalizada,
     FalloEstacion,
     LecturaNormalizada,
@@ -69,11 +70,6 @@ CODIGO_PAIS = "CO"
 
 LIMITE_POR_PAGINA = 1000  # máximo que permite OpenAQ
 MAX_PAGINAS = 20          # freno de seguridad contra un bucle infinito
-
-# Una estación cuyo último dato es más viejo que esto se considera inactiva.
-# Se reevalúa en cada corrida con el `datetimeLast` fresco: si revive, se
-# detecta sola. Constante a propósito, para cambiarla en un solo lugar.
-VENTANA_ACTIVIDAD_DIAS = 7
 
 INTERVALO_MIN_S = 1.1     # 60/min = 1 por segundo; 0.1 s de margen
 MAX_REINTENTOS = 3
