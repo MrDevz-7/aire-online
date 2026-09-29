@@ -7,7 +7,6 @@ declaramos UNA vez qué variables existen, de qué tipo son, y si tienen
 un valor por defecto. Si falta una variable obligatoria, la app falla
 al arrancar (fail-fast) en vez de fallar a mitad de una request.
 """
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +18,11 @@ class Settings(BaseSettings):
     # aire_online). En cualquier otro entorno se pisa con la variable
     # de entorno DATABASE_URL.
     DATABASE_URL: str = "postgresql+psycopg2://aire_online:aire_online_dev@localhost:5432/aire_online"
+
+    # OpenAQ (M3). Vacía por defecto: el cliente valida que exista al
+    # crearse y falla con un mensaje claro si falta.
+    OPENAQ_API_KEY: str = ""
+
     GEMINI_API_KEYS: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
     ENVIRONMENT: str = "development"
