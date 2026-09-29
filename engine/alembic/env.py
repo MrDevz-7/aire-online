@@ -4,6 +4,7 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+from sqlalchemy.engine import make_url
 
 from alembic import context
 
@@ -17,6 +18,40 @@ from database.models import Base  # noqa: E402
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# Hosts que consideramos "locales". "postgres" es el nombre del servicio
+# en docker-compose (útil si algún día Alembic corre dentro de la red de
+# Docker). Se compara en minúsculas.
+HOSTS_LOCALES = {"localhost", "127.0.0.1", "::1", "postgres"}
+
+
+def verificar_destino_local(url: str) -> None:
+    """Guard clause: frena la migración si la base no es local.
+
+    Se ejecuta ANTES de abrir cualquier conexión. Si el host no es local y
+    no está definida ALLOW_REMOTE_MIGRATION=1, lanza RuntimeError y no se
+    toca nada.
+
+    Solo se imprime el host en el mensaje, nunca la URL completa: la URL
+    incluye la contraseña y los errores terminan en logs y capturas.
+    """
+    host = make_url(url).host  # None si la URL usa socket Unix (local)
+    if host is None or host.lower() in HOSTS_LOCALES:
+        return
+    if os.environ.get("ALLOW_REMOTE_MIGRATION") == "1":
+        return
+    raise RuntimeError(
+        f"Migración detenida: DATABASE_URL apunta a un host NO local ({host!r}). "
+        "Si es a propósito, definí ALLOW_REMOTE_MIGRATION=1 y repetí. "
+        "Si no, revisá tu engine/.env y las variables de entorno de la sesión."
+    )
+
+
+# La guarda va ANTES de set_main_option: si falla, Alembic ni siquiera
+# llega a configurar la conexión. Vive a nivel de módulo (no dentro de
+# run_migrations_online) para cubrir todos los comandos que ejecutan este
+# archivo: upgrade, downgrade, current, revision --autogenerate, etc.
+verificar_destino_local(settings.DATABASE_URL)
 
 # Sobreescribimos la URL de conexión del alembic.ini con la que viene de
 # nuestro .env (una sola fuente de verdad para la DATABASE_URL).
@@ -48,7 +83,6 @@ def run_migrations_offline() -> None:
 
     Calls to context.execute() here emit the given string to the
     script output.
-
     """
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
@@ -67,7 +101,6 @@ def run_migrations_online() -> None:
 
     In this scenario we need to create an Engine
     and associate a connection with the context.
-
     """
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
