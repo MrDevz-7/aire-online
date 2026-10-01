@@ -14,9 +14,10 @@ SQLAlchemy describen tablas de la base de datos; los schemas Pydantic
 describen el JSON de entrada/salida de la API. No siempre coinciden
 campo a campo.
 
-Hoy solo existe HealthResponse; los schemas de dominio llegan con sus
-endpoints en módulos posteriores.
+Hoy existen HealthResponse y el resumen de ingestión (endpoints internos de
+M3); los schemas de dominio llegan con sus endpoints en módulos posteriores.
 """
+from typing import Optional
 
 from pydantic import BaseModel
 
@@ -24,3 +25,24 @@ from pydantic import BaseModel
 class HealthResponse(BaseModel):
     status: str
     environment: str
+
+
+class EstacionFallidaResponse(BaseModel):
+    id_externo: str
+    motivo: str
+
+
+class ResumenIngestionResponse(BaseModel):
+    """Resumen de una ingestión manual (ver services/ingestion.py)."""
+
+    fuente: str
+    estaciones_nuevas: int
+    estaciones_actualizadas: int
+    estaciones_sin_cambios: int
+    estaciones_sin_actividad: int
+    lecturas_insertadas: int
+    lecturas_duplicadas: int
+    lecturas_invalidas: int
+    estaciones_fallidas: list[EstacionFallidaResponse]
+    estaciones_descartadas: dict[str, int]
+    abortada: Optional[str] = None
