@@ -1,10 +1,11 @@
 """
 Modelos SQLAlchemy 2.x (sintaxis declarativa con `Mapped` / `mapped_column`).
 
-Esquema de AirE_Online: una capa que reconcilia tres fuentes de calidad del
-aire que no comparten ID de estación (OpenAQ, AQICN/WAQI, SISAIRE/IDEAM) y
-audita el pronóstico de AQICN contra la lectura real. Sin machine learning:
-todo es medición, comparación y aritmética.
+Esquema de AirE_Online: una capa que reconcilia varias fuentes de calidad
+del aire que no comparten ID de estación (OpenAQ, AQICN/WAQI y, desde M4,
+dos redes regionales de monitoreo: IBOCA en Bogotá y SIATA en el Valle de
+Aburrá) y audita el pronóstico de AQICN contra la lectura real. Sin
+machine learning: todo es medición, comparación y aritmética.
 
 Convenciones (ver docs/MODELO_DATOS.md):
   - Tablas y columnas en español, snake_case, sin tildes; tablas en plural.
@@ -53,8 +54,19 @@ class Base(DeclarativeBase):
 # --------------------------------------------------------------------------
 # Valores permitidos de las enumeraciones (fuente única de verdad).
 # --------------------------------------------------------------------------
-FUENTES: tuple[str, ...] = ("openaq", "aqicn", "sisaire")
-CONTAMINANTES: tuple[str, ...] = ("pm25", "pm10", "o3", "no2", "so2", "co", "aqi")
+# "sisaire" se agregó pensando en el portal nacional (IDEAM). M4 investigó
+# ese portal y confirmó que no publica lecturas recientes por estación, así
+# que scrapea dos redes REGIONALES en su lugar: "iboca" (Bogotá) y "siata"
+# (Valle de Aburrá). "sisaire" queda en el CHECK sin uso: sacarlo sería una
+# migración no aditiva (hay que probar que nada lo esté usando) para ganar
+# nada; agregar valores nuevos, en cambio, es barato (ver mini-clase CHECK
+# vs ENUM en el commit de este bloque). Quedan afuera de M4, para módulos
+# futuros con el mismo patrón: "corantioquia" y "simac".
+FUENTES: tuple[str, ...] = ("openaq", "aqicn", "sisaire", "iboca", "siata")
+# "pm1" (material particulado <1 micra, más fino que pm25) lo mide la red
+# IBOCA de Bogotá (M4). Sí es un contaminante del aire (a diferencia de un
+# índice compuesto como el UV, descartado en M3).
+CONTAMINANTES: tuple[str, ...] = ("pm1", "pm25", "pm10", "o3", "no2", "so2", "co", "aqi")
 ESTADOS_AUDITORIA: tuple[str, ...] = ("pendiente", "resuelta", "sin_datos")
 TIPOS_ALERTA: tuple[str, ...] = ("umbral_aqi", "discrepancia_fuentes")
 SEVERIDADES_ALERTA: tuple[str, ...] = ("baja", "media", "alta", "critica")
