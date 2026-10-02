@@ -1,15 +1,13 @@
 """
 App principal de FastAPI (engine de AirE_Online).
+
 Se corre con: python -m uvicorn api.main:app --reload --port 8000
 (desde la carpeta engine/, con el venv activado)
-`--reload` hace que uvicorn reinicie el servidor automáticamente cada vez
-que guardas un cambio en el código; es solo para desarrollo, en
-producción no se usa.
-Expone /api/health, los endpoints internos de ingestión manual de M3
-(/internal/ingest/openaq y /internal/ingest/aqicn), y desde M5a los
-endpoints internos de reconciliación (/internal/reconciliacion/emparejar
-y /internal/reconciliacion/comparar). Los endpoints de dominio
-(estaciones, lecturas, auditorías, alertas) llegan en módulos posteriores.
+
+Expone /api/health, los endpoints internos de ingestión manual (M3:
+OpenAQ, AQICN; M4: IBOCA, SIATA) y, desde M5a, los endpoints internos
+de reconciliación. Los endpoints de dominio (estaciones, lecturas,
+auditorías, alertas) llegan en módulos posteriores.
 """
 import asyncio
 import logging
@@ -28,10 +26,17 @@ from api.schemas import (
 )
 from database.config import settings
 from database.session import get_db
-from services.ingestion import ejecutar_aqicn, ejecutar_openaq
+from services.ingestion import (
+    ejecutar_aqicn,
+    ejecutar_iboca,
+    ejecutar_openaq,
+    ejecutar_siata,
+)
 from services.reconciliacion import calcular_comparaciones, calcular_emparejamientos
 from sources.aqicn import AQICNConfigError, AQICNError
+from sources.iboca import IBOCAError
 from sources.openaq import OpenAQConfigError, OpenAQError
+from sources.siata import SIATAError
 
 # En Windows se fuerza la política de event loop "Proactor". Se conserva
 # tal cual estaba en CustoFinder: es inocua en Linux/macOS (el if la
@@ -86,16 +91,17 @@ app.add_middleware(ForceUTF8JSONMiddleware)
 def health_check() -> HealthResponse:
     """
     Healthcheck simple: responde si el proceso está vivo. A propósito NO
-    depende de la base de datos ni de las fuentes externas (OpenAQ, AQICN):
-    que una API de terceros esté caída no debe hacer que un despliegue
-    parezca roto. Si más adelante hace falta un healthcheck "profundo" (que
-    sí chequee la DB), se agrega como endpoint separado, ej. /api/health/db.
+    depende de la base de datos ni de las fuentes externas (OpenAQ, AQICN,
+    IBOCA, SIATA): que una fuente de terceros esté caída no debe hacer que
+    un despliegue parezca roto. Si más adelante hace falta un healthcheck
+    "profundo" (que sí chequee la DB), se agrega como endpoint separado,
+    ej. /api/health/db.
     """
     return HealthResponse(status="ok", environment=settings.ENVIRONMENT)
 
 
 # ---------------------------------------------------------------------------
-# TEMPORAL: endpoints de ingestión manual, solo para probar M3 a mano.
+# TEMPORAL: endpoints de ingestión manual, solo para probar M3 y M4 a mano.
 #   - En M7 quedan detrás del gateway (no se exponen directo).
 #   - En M10 la ingestión periódica la dispara un job programado, no una
 #     persona llamando a estos endpoints.
@@ -128,6 +134,31 @@ def ingest_aqicn(db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=503, detail=str(exc))
     except AQICNError as exc:
         raise HTTPException(status_code=502, detail=f"AQICN falló: {exc}")
+
+
+@app.post("/internal/ingest/iboca", response_model=ResumenIngestionResponse, tags=["internal"])
+def ingest_iboca(db: Session = Depends(get_db)) -> dict:
+    """Descarga IBOCA (Bogotá) y la escribe en la base. Devuelve un resumen.
+
+    IBOCA no requiere clave: es un servicio público sin registro. El
+    cliente devuelve un ResultadoDescarga vacío con `abortada` si el
+    servicio falla; ese caso NO lanza excepción, así que la respuesta es
+    200 con el resumen mostrando el motivo en el campo `abortada`.
+    """
+    try:
+        return ejecutar_iboca(db).a_dict()
+    except IBOCAError as exc:
+        raise HTTPException(status_code=502, detail=f"IBOCA falló: {exc}")
+
+
+@app.post("/internal/ingest/siata", response_model=ResumenIngestionResponse, tags=["internal"])
+def ingest_siata(db: Session = Depends(get_db)) -> dict:
+    """Descarga SIATA (Valle de Aburrá) y la escribe en la base. Devuelve
+    un resumen. Hace 5 requests (una por capa) y mergea por `Codigo`."""
+    try:
+        return ejecutar_siata(db).a_dict()
+    except SIATAError as exc:
+        raise HTTPException(status_code=502, detail=f"SIATA falló: {exc}")
 
 
 # ---------------------------------------------------------------------------

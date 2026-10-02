@@ -2,16 +2,17 @@
 Capa de ingestión: escribe en Postgres lo que descargaron los clientes.
 
 Separación de responsabilidades (por qué esto NO vive en los clientes):
-  - Un CLIENTE (sources/openaq.py, sources/aqicn.py) sabe hablar con UNA API
-    y traducir su JSON a `sources.tipos`. No conoce la base de datos.
-  - Este SERVICIO sabe hablar con la base de datos. No conoce ninguna API:
-    solo recibe un `ResultadoDescarga` (la forma intermedia común).
-Así se puede probar la ingestión sin red (con datos armados a mano), probar
-un cliente sin base, y sumar una tercera fuente (SISAIRE, M4) sin tocar nada
+  - Un CLIENTE (sources/openaq.py, sources/aqicn.py, sources/iboca.py,
+    sources/siata.py) sabe hablar con UNA fuente y traducir su formato a
+    `sources.tipos`. No conoce la base de datos.
+  - Este SERVICIO sabe hablar con la base de datos. No conoce ninguna
+    API: solo recibe un `ResultadoDescarga` (la forma intermedia común).
+
+Así se puede probar la ingestión sin red (con datos armados a mano),
+probar un cliente sin base, y sumar una fuente nueva (M4) sin tocar nada
 de acá: solo tiene que devolver el mismo `ResultadoDescarga`.
 
 Dos operaciones, dos estrategias distintas:
-
   ESTACIONES -> UPSERT (INSERT ... ON CONFLICT DO UPDATE). "Upsert" es
     "update or insert": si la estación (fuente, id_externo) no existe se
     inserta; si ya existe se actualiza. ON CONFLICT le dice a Postgres qué
@@ -19,7 +20,6 @@ Dos operaciones, dos estrategias distintas:
     Lo resuelve la propia base en una sola operación atómica, así que no hay
     hueco entre "mirar si existe" y "escribir" en el que otro proceso pueda
     colarse.
-
   LECTURAS -> INSERT ... ON CONFLICT DO NOTHING. Las lecturas son
     "append-only": solo se agregan, nunca se corrigen ni se borran; son el
     registro de qué dijo cada fuente y cuándo. Si la misma lectura
@@ -47,7 +47,9 @@ from sqlalchemy.orm import Session
 
 from database.models import CONTAMINANTES, FUENTES, Estacion, Lectura, utcnow
 from sources.aqicn import ClienteAQICN
+from sources.iboca import ClienteIBOCA
 from sources.openaq import ClienteOpenAQ
+from sources.siata import ClienteSIATA
 from sources.tipos import EstacionNormalizada, ResultadoDescarga
 
 logger = logging.getLogger(__name__)
@@ -58,7 +60,6 @@ LONGITUD_MAX_UNIDAD = 20  # columna lecturas.unidad = String(20)
 @dataclass
 class ResumenIngestion:
     """Qué pasó en una ingestión. Es lo que devuelven los endpoints internos."""
-
     fuente: str
     estaciones_nuevas: int = 0
     estaciones_actualizadas: int = 0   # ya existían y cambió nombre, coordenadas o `activa`
@@ -225,5 +226,17 @@ def ejecutar_openaq(db: Session) -> ResumenIngestion:
 
 def ejecutar_aqicn(db: Session) -> ResumenIngestion:
     with ClienteAQICN() as cliente:
+        resultado = cliente.descargar()
+    return ingerir(db, resultado)
+
+
+def ejecutar_iboca(db: Session) -> ResumenIngestion:
+    with ClienteIBOCA() as cliente:
+        resultado = cliente.descargar()
+    return ingerir(db, resultado)
+
+
+def ejecutar_siata(db: Session) -> ResumenIngestion:
+    with ClienteSIATA() as cliente:
         resultado = cliente.descargar()
     return ingerir(db, resultado)
