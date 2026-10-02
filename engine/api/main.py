@@ -1,15 +1,14 @@
 """
 App principal de FastAPI (engine de AirE_Online).
-
 Se corre con: python -m uvicorn api.main:app --reload --port 8000
 (desde la carpeta engine/, con el venv activado)
-
 `--reload` hace que uvicorn reinicie el servidor automáticamente cada vez
 que guardas un cambio en el código; es solo para desarrollo, en
 producción no se usa.
-
-Expone /api/health y, desde M3, dos endpoints internos de ingestión manual
-(/internal/ingest/openaq y /internal/ingest/aqicn). Los endpoints de dominio
+Expone /api/health, los endpoints internos de ingestión manual de M3
+(/internal/ingest/openaq y /internal/ingest/aqicn), y desde M5a los
+endpoints internos de reconciliación (/internal/reconciliacion/emparejar
+y /internal/reconciliacion/comparar). Los endpoints de dominio
 (estaciones, lecturas, auditorías, alertas) llegan en módulos posteriores.
 """
 import asyncio
@@ -21,10 +20,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from api.schemas import HealthResponse, ResumenIngestionResponse
+from api.schemas import (
+    HealthResponse,
+    ResumenComparacionResponse,
+    ResumenEmparejamientoResponse,
+    ResumenIngestionResponse,
+)
 from database.config import settings
 from database.session import get_db
 from services.ingestion import ejecutar_aqicn, ejecutar_openaq
+from services.reconciliacion import calcular_comparaciones, calcular_emparejamientos
 from sources.aqicn import AQICNConfigError, AQICNError
 from sources.openaq import OpenAQConfigError, OpenAQError
 
@@ -66,7 +71,6 @@ class ForceUTF8JSONMiddleware(BaseHTTPMiddleware):
     charset explícito en cada respuesta para que cualquier cliente HTTP
     (PowerShell, curl, el gateway, etc) lo interprete bien.
     """
-
     async def dispatch(self, request, call_next):
         response = await call_next(request)
         content_type = response.headers.get("content-type", "")
@@ -115,7 +119,6 @@ def ingest_openaq(db: Session = Depends(get_db)) -> dict:
 @app.post("/internal/ingest/aqicn", response_model=ResumenIngestionResponse, tags=["internal"])
 def ingest_aqicn(db: Session = Depends(get_db)) -> dict:
     """Descarga AQICN (Colombia) y la escribe en la base. Devuelve un resumen.
-
     Tarda decenas de segundos: el descubrimiento por cuadrantes hace ~90
     requests y luego se pide el detalle de cada estación.
     """
@@ -125,3 +128,39 @@ def ingest_aqicn(db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=503, detail=str(exc))
     except AQICNError as exc:
         raise HTTPException(status_code=502, detail=f"AQICN falló: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# TEMPORAL: endpoints de reconciliación manual, solo para probar M5a a mano.
+#   - En M7 quedan detrás del gateway, igual que los de ingestión.
+#   - En M10 un job periódico los dispara después de cada ingestión, no
+#     una persona.
+#
+# También `def` y no `async def`: aunque esto no hace requests HTTP, sí
+# hace varias consultas SQL encadenadas (bloqueantes con el driver
+# psycopg2 que usa el proyecto); el mismo razonamiento de arriba aplica.
+# ---------------------------------------------------------------------------
+@app.post(
+    "/internal/reconciliacion/emparejar",
+    response_model=ResumenEmparejamientoResponse,
+    tags=["internal"],
+)
+def reconciliacion_emparejar(db: Session = Depends(get_db)) -> dict:
+    """Calcula (o actualiza) los emparejamientos entre estaciones activas
+    de fuentes distintas dentro de RADIO_EMPAREJAMIENTO_KM.
+    Ver services/reconciliacion.py.
+    """
+    return calcular_emparejamientos(db).a_dict()
+
+
+@app.post(
+    "/internal/reconciliacion/comparar",
+    response_model=ResumenComparacionResponse,
+    tags=["internal"],
+)
+def reconciliacion_comparar(db: Session = Depends(get_db)) -> dict:
+    """Calcula (o actualiza) las comparaciones por hora entre lecturas de
+    estaciones emparejadas, convirtiendo a una escala común cuando hace
+    falta. Ver services/reconciliacion.py.
+    """
+    return calcular_comparaciones(db).a_dict()
