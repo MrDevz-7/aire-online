@@ -1,13 +1,13 @@
 """
 App principal de FastAPI (engine de AirE_Online).
-
 Se corre con: python -m uvicorn api.main:app --reload --port 8000
 (desde la carpeta engine/, con el venv activado)
 
 Expone /api/health, los endpoints internos de ingestión manual (M3:
-OpenAQ, AQICN; M4: IBOCA, SIATA), los de reconciliación (M5a) y el de
-auditoría de pronóstico (M5b). Los endpoints de dominio (estaciones,
-lecturas, alertas) llegan en módulos posteriores.
+OpenAQ, AQICN; M4: IBOCA, SIATA), los de reconciliación (M5a), el de
+auditoría de pronóstico (M5b) y el de captura de pronósticos de
+Open-Meteo (M5c). Los endpoints de dominio (estaciones, lecturas,
+alertas) llegan en módulos posteriores.
 """
 import asyncio
 import logging
@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from api.schemas import (
     HealthResponse,
     ResumenAuditoriaResponse,
+    ResumenCapturaPronosticosResponse,
     ResumenComparacionResponse,
     ResumenEmparejamientoResponse,
     ResumenIngestionResponse,
@@ -34,9 +35,11 @@ from services.ingestion import (
     ejecutar_openaq,
     ejecutar_siata,
 )
+from services.pronosticos import capturar_pronosticos
 from services.reconciliacion import calcular_comparaciones, calcular_emparejamientos
 from sources.aqicn import AQICNConfigError, AQICNError
 from sources.iboca import IBOCAError
+from sources.open_meteo import OpenMeteoConfigError, OpenMeteoError
 from sources.openaq import OpenAQConfigError, OpenAQError
 from sources.siata import SIATAError
 
@@ -74,6 +77,7 @@ class ForceUTF8JSONMiddleware(BaseHTTPMiddleware):
     y corrompe cualquier tilde/eñe ("é" -> "Ã©"). Este middleware fuerza
     el charset explícito en cada respuesta.
     """
+
     async def dispatch(self, request, call_next):
         response = await call_next(request)
         content_type = response.headers.get("content-type", "")
@@ -155,13 +159,14 @@ def ingest_siata(db: Session = Depends(get_db)) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# TEMPORAL: endpoints de reconciliación y auditoría manual, solo para
-# probar M5a y M5b a mano.
+# TEMPORAL: endpoints de reconciliación, auditoría y captura de pronósticos
+# manuales, solo para probar M5a/M5b/M5c a mano.
 #   - En M7 quedan detrás del gateway, igual que los de ingestión.
 #   - En M10 un job periódico los dispara después de cada ingestión.
 #
-# También `def` y no `async def`: aunque no hacen requests HTTP, sí hacen
-# varias consultas SQL encadenadas (bloqueantes con psycopg2).
+# También `def` y no `async def`: aunque no hacen requests HTTP (salvo la
+# captura de M5c), sí hacen varias consultas SQL encadenadas (bloqueantes
+# con psycopg2).
 # ---------------------------------------------------------------------------
 @app.post(
     "/internal/reconciliacion/emparejar",
@@ -192,10 +197,34 @@ def reconciliacion_comparar(db: Session = Depends(get_db)) -> dict:
 @app.post("/internal/audit/run", response_model=ResumenAuditoriaResponse, tags=["internal"])
 def audit_run(db: Session = Depends(get_db)) -> dict:
     """Resuelve las auditorías pendientes cuyo día objetivo ya terminó.
-
     'Ya terminó' se mide en hora local Colombia. Si el día todavía no
     terminó, la auditoría se deja como `pendiente` (no se calcula con
     datos parciales). Idempotente: la segunda corrida seguida no hace
     nada (no hay pendientes vencidas nuevas). Ver services/auditoria.py.
     """
     return calcular_auditorias(db).a_dict()
+
+
+@app.post(
+    "/internal/pronosticos/capturar",
+    response_model=ResumenCapturaPronosticosResponse,
+    tags=["internal"],
+)
+def pronosticos_capturar(db: Session = Depends(get_db)) -> dict:
+    """Captura pronósticos de Open-Meteo para las estaciones AQICN activas
+    con lecturas recientes (D62).
+
+    Idempotente: `ON CONFLICT DO NOTHING` sobre el UNIQUE de `pronosticos`.
+    La PRIMERA captura del día gana; una segunda corrida el mismo día
+    devuelve `pronosticos_insertados: 0` y `pronosticos_ya_existian: N`.
+
+    No requiere API key. Ver services/pronosticos.py.
+    """
+    try:
+        return capturar_pronosticos(db).a_dict()
+    except OpenMeteoConfigError as exc:
+        # Defensivo: el cliente ya batchea por debajo del tope, así que
+        # esto no debería dispararse en uso normal.
+        raise HTTPException(status_code=503, detail=str(exc))
+    except OpenMeteoError as exc:
+        raise HTTPException(status_code=502, detail=f"Open-Meteo falló: {exc}")

@@ -62,3 +62,21 @@ class ResumenAuditoriaResponse(BaseModel):
     todavia_no_vencen: int
     resueltas: int
     sin_datos: int
+
+
+class ResumenCapturaPronosticosResponse(BaseModel):
+    """Resumen de una captura de pronósticos de Open-Meteo (ver
+    services/pronosticos.py, M5c). Se devuelve tal cual el dict del
+    servicio, con `por_horizonte` serializado a string keys por JSON."""
+    estaciones_activas: int
+    pares_estacion_contaminante: int
+    coords_unicas: int
+    requests: int
+    ubicaciones_devueltas: int
+    pronosticos_candidatos: int
+    pronosticos_insertados: int
+    pronosticos_ya_existian: int
+    auditorias_creadas: int
+    por_horizonte: dict[str, int]
+    fallos: list[str]
+    abortada: Optional[str] = None
