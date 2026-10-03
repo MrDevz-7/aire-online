@@ -5,6 +5,7 @@ devuelve JSON distinto. Para que el resto del sistema no tenga que saber
 de esas diferencias, cada cliente TRADUCE su JSON a estas clases. La capa
 de ingestión solo conoce estas clases y la base de datos: nunca ve JSON
 de una API.
+
 Son dataclasses simples, sin lógica de negocio y sin dependencia de
 SQLAlchemy ni de httpx. Los valores y unidades se guardan TAL CUAL los
 reporta la fuente: la conversión entre fuentes es de M5.
@@ -34,24 +35,28 @@ class LecturaNormalizada:
 @dataclass(frozen=True)
 class PronosticoNormalizado:
     """Un día pronosticado por una estación.
+
     `fecha_objetivo` es el día calendario local (no un instante): el "día
     que cubre" el pronóstico. `valor_promedio`, `min` y `max` pueden ser
     None por separado según lo que publique la fuente; una fuente que solo
     dé `avg` deja min/max en None, y no se inventan.
 
-    Se conserva acá aunque AQICN dejó de aportar pronósticos (D58): el
-    cliente de Open-Meteo (M5c) la reutiliza tal cual.
+    `unidad` (M5c, D65): la unidad del valor, en la misma convención que
+    `lecturas.unidad`. Se agrega para poder persistirla en
+    `pronosticos.unidad` (migración c3a4e2f5b8d1). Para AQICN histórico
+    era None (se retiró su captura, D58). Open-Meteo siempre la setea.
     """
     contaminante: str
     fecha_objetivo: date
     valor_promedio: float | None
     valor_min: float | None
     valor_max: float | None
+    unidad: str | None = None
 
 
 @dataclass
 class EstacionNormalizada:
-    fuente: str        # openaq | aqicn | iboca | siata
+    fuente: str        # openaq | aqicn | iboca | siata | open-meteo
     id_externo: str    # id de la estación en esa fuente, como texto
     nombre: str
     latitud: float
@@ -71,6 +76,7 @@ class FalloEstacion:
 @dataclass
 class ResultadoDescarga:
     """Lo que devuelve un cliente tras una descarga completa.
+
     Separa cuatro destinos posibles de cada estación: procesada
     (`estaciones`), fallida (`fallos`: se intentó y algo salió mal),
     descartada (`descartadas`: se decidió no usarla, por ejemplo por ser de
