@@ -57,11 +57,20 @@ class ResumenComparacionResponse(BaseModel):
 
 class ResumenAuditoriaResponse(BaseModel):
     """Resumen de un cálculo de auditorías de pronóstico (ver
-    services/auditoria.py, M5b)."""
+    services/auditoria.py, M5c).
+
+    `no_auditables_por_contaminante` desglosa por contaminante las filas
+    que pasaron a estado 'no_auditable' (D64: o3, no2, so2, co no tienen
+    conversión validada µg/m³ → ppb/ppm en M5a). Es una lista esperable
+    de contaminantes, no un error.
+    """
     pendientes_antes: int
     todavia_no_vencen: int
+    pendientes_por_horas_insuficientes: int
     resueltas: int
     sin_datos: int
+    no_auditables: int
+    no_auditables_por_contaminante: dict[str, int]
 
 
 class ResumenCapturaPronosticosResponse(BaseModel):

@@ -72,7 +72,11 @@ FUENTES: tuple[str, ...] = ("openaq", "aqicn", "sisaire", "iboca", "siata", "ope
 # IBOCA de Bogotá (M4). Sí es un contaminante del aire (a diferencia de un
 # índice compuesto como el UV, descartado en M3).
 CONTAMINANTES: tuple[str, ...] = ("pm1", "pm25", "pm10", "o3", "no2", "so2", "co", "aqi")
-ESTADOS_AUDITORIA: tuple[str, ...] = ("pendiente", "resuelta", "sin_datos")
+# M5c 5.2 (D64): se agrega "no_auditable" para filas cuyo contaminante el
+# proyecto captura pero no sabe auditar todavía (o3, no2, so2, co). No es
+# un error: es la forma de decir "no se inventa una conversión". Migración
+# aditiva: d8e2f9a4b1c5b.
+ESTADOS_AUDITORIA: tuple[str, ...] = ("pendiente", "resuelta", "sin_datos", "no_auditable")
 TIPOS_ALERTA: tuple[str, ...] = ("umbral_aqi", "discrepancia_fuentes")
 SEVERIDADES_ALERTA: tuple[str, ...] = ("baja", "media", "alta", "critica")
 ESTADOS_ALERTA: tuple[str, ...] = ("nueva", "en_revision", "notificada", "normalizada")
@@ -247,7 +251,11 @@ class AuditoriaPronostico(Base):
     exige un mínimo (MIN_HORAS_CON_LECTURA_AUDITORIA, definido en
     services/auditoria.py); si no se alcanza, la fila queda `pendiente` y
     no se calcula con datos parciales. Sin backfill en la migración
-    d8e2f9a4b1c5: las auditorías viejas quedan con NULL."""
+    d8e2f9a4b1c5: las auditorías viejas quedan con NULL.
+
+    D64: el estado `no_auditable` marca las filas cuyo contaminante el
+    proyecto captura pero no sabe llevar a escala común todavía (o3, no2,
+    so2, co). Se resuelven a este estado sin valor_real ni errores."""
     __tablename__ = "auditorias_pronostico"
     __table_args__ = (
         UniqueConstraint("pronostico_id", name="uq_auditorias_pronostico_pronostico_id"),
