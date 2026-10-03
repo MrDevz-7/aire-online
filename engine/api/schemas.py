@@ -60,3 +60,12 @@ class ResumenComparacionResponse(BaseModel):
     comparaciones_nuevas: int
     comparaciones_actualizadas: int
     comparaciones_omitidas: int
+
+
+class ResumenAuditoriaResponse(BaseModel):
+    """Resumen de un cálculo de auditorías de pronóstico (ver
+    services/auditoria.py, M5b)."""
+    pendientes_antes: int
+    todavia_no_vencen: int
+    resueltas: int
+    sin_datos: int
