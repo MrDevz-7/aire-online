@@ -240,7 +240,14 @@ class Pronostico(Base):
 
 class AuditoriaPronostico(Base):
     """El veredicto sobre un pronóstico: qué pasó realmente y cuánto se
-    equivocó. Una auditoría por pronóstico (UNIQUE)."""
+    equivocó. Una auditoría por pronóstico (UNIQUE).
+
+    D66: `horas_con_lectura` guarda en cuántas HORAS distintas del día
+    local hubo al menos una lectura real. El criterio de "día completo"
+    exige un mínimo (MIN_HORAS_CON_LECTURA_AUDITORIA, definido en
+    services/auditoria.py); si no se alcanza, la fila queda `pendiente` y
+    no se calcula con datos parciales. Sin backfill en la migración
+    d8e2f9a4b1c5: las auditorías viejas quedan con NULL."""
     __tablename__ = "auditorias_pronostico"
     __table_args__ = (
         UniqueConstraint("pronostico_id", name="uq_auditorias_pronostico_pronostico_id"),
@@ -274,6 +281,10 @@ class AuditoriaPronostico(Base):
     )
     distancia_km_real: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     n_lecturas_real: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # M5c (D66): horas distintas del día local con al menos una lectura.
+    # Se llena al calcular; NULL si la auditoría todavía no se procesó o
+    # si se procesó con el criterio viejo (M5b).
+    horas_con_lectura: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     resuelta_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
