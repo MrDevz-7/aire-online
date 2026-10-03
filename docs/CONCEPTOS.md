@@ -45,7 +45,6 @@ Registro de los conceptos aprendidos en cada módulo del proyecto. Se completa a
 - **Anidamiento del JSON**: DevTools colapsa los niveles por defecto y eso engaña. En SIATA, los atributos útiles (`Codigo`, `ICA_PM25_Valor`) están en `atributos.descripcion.*`, un nivel más abajo de donde uno los esperaría (`atributos.*`). Leer jerarquías de un screenshot de DevTools es trampa; imprimir las claves con `list(d.keys())` o `json.dumps(...)[:2500]` es la fuente de verdad.
 - **Merge por clave, no por request**: en IBOCA, una sola llamada trae todos los contaminantes juntos. En SIATA, cada contaminante está en su propia capa y la misma estación física aparece en varias. La solución es agrupar por `Codigo`: la primera vez que aparece un código se crea la estación, las siguientes se le pegan las lecturas. Un solo diccionario, orden garantizado por iteración del diccionario de capas.
 
-
 ## M5a — Reconciliación entre fuentes
 
 - **Haversine + prefiltro por caja**: la Tierra es una esfera, no un plano, así que la distancia real entre dos coordenadas necesita trigonometría (Haversine), no una resta simple. Esa trigonometría es cara, así que antes de calcularla se descartan con una caja rectangular (comparar rangos, gratis) los pares que obviamente están lejos. PostGIS resolvería esto mejor a gran escala, pero es una dependencia de más para las pocas estaciones que maneja este proyecto.
@@ -68,3 +67,21 @@ Registro de los conceptos aprendidos en cada módulo del proyecto. Se completa a
 - **Verificación empírica contra evidencia externa**: la investigación externa del brief sostenía que AQICN tenía forecast futuro para Bogotá y Medellín específicamente. La observación directa (6 estaciones + 2 feeds de ciudad + JSON crudo) refuta esa hipótesis: el patrón es uniforme y retrospectivo. Confiar en una fuente secundaria sin verificarla contra la API real puede llevar a construir arquitectura sobre una premisa falsa.
 - **Costo de la prueba vs. costo de la certeza**: dos intentos (12 requests aprox.) alcanzaron para descartar una hipótesis. El brief autorizaba hasta 10 intentos; parar en 2 fue una decisión, no una limitación — agregar más muestras con el mismo patrón no cambia la conclusión, solo la demora. Reconocer "ya tengo la respuesta" es tan importante como reconocer "necesito seguir probando".
 - **Alcance de la verificación**: el hallazgo es específico para Colombia. Distinguir si AQICN no predice para ningún país hoy, o si es solo para Colombia, o si es una degradación temporal, requiere probar una estación fuera de Colombia — fuera del scope de este módulo, queda como decisión de arquitectura pendiente para el PM.
+
+## M5c — Pronósticos reales con Open-Meteo
+
+- **Celda de un modelo global vs. estación puntual**: Open-Meteo devuelve el centro de la celda de la grilla de CAMS Global (~45 km de resolución), no la coordenada pedida. Varias estaciones de una misma ciudad caen en la misma celda y comparten pronóstico: no es un error, es la resolución del modelo. Consecuencia práctica: un pronóstico no es "de la estación X" sino "de la celda que contiene a la estación X"; si dos estaciones están en la misma celda, el pronóstico es idéntico aunque el modelo lo devuelva dos veces.
+- **Primera captura del día gana**: hay tres formas de idempotencia ya vistas en el proyecto (`ON CONFLICT DO UPDATE`, filtrado por estado, y `ON CONFLICT DO NOTHING`). Para pronósticos se eligió la tercera: si el mismo día se captura dos veces, la fila existente no se toca. Es un registro histórico inmutable: si Open-Meteo corrige el pronóstico unas horas después, no pisamos la versión original. Reconstruir "qué se sabía en el momento" exige guardar la primera versión, no la última.
+- **Valor diario sin inventar datos**: la serie de Open-Meteo viene horaria; el esquema pide un valor diario. El promedio de 24 horas es la agregación simple, pero descartando el día si falta CUALQUIER hora (D61) — promediar 20 horas sesga el resultado de forma no controlada, dependiendo de qué horas falten. El resultado es un número defendible, no una aproximación.
+- **"Pedir 7 días" ≠ "tener 7 días"**: `forecast_days=7` es lo que se pide; lo que se guarda es lo que tenga 24 h no nulas. La medición real (Bloque 1) dio 3 días útiles con los últimos 3 vacíos o casi vacíos. Documentar el horizonte real y no el pedido es lo que separa un sistema honesto de uno que promete más de lo que puede entregar (D33).
+- **Misma escala antes de restar**: comparar un pronóstico en µg/m³ con una lectura real en AQI es restar metros contra grados Celsius. Se convierten ambos a la misma escala antes de calcular el error. En este caso se convierte el pronóstico (a AQI) porque la tabla EPA ya existe en M5a, mientras que la conversión inversa (AQI → µg/m³) es ambigua por los tramos. Y hay un tercer grupo de contaminantes (o3, no2, so2, co) que NO se auditan: pasar µg/m³ a ppb/ppm requiere peso molecular y condiciones de temperatura/presión, y no se inventa un número. Se capturan, pero se marcan como `no_auditable`, sin ambigüedad.
+
+## Atribución requerida
+
+Los datos de calidad del aire de Open-Meteo Air Quality API provienen, para el dominio global (`cams_global`), del **Copernicus Atmosphere Monitoring Service (CAMS)** de ECMWF. Cualquier texto público que use estos datos debe atribuir tanto al proveedor de los datos (CAMS/ECMWF) como a Open-Meteo como API que los expone.
+
+Redacción sugerida, basada en la página de licencia oficial de Open-Meteo (https://open-meteo.com/en/licence, consultada el 2026-10-03):
+
+> Datos de calidad del aire: Copernicus Atmosphere Monitoring Service (CAMS), expuestos vía Open-Meteo Air Quality API (open-meteo.com). Uso no comercial.
+
+Si Open-Meteo cambia su licencia o el texto exacto de atribución, la referencia debe actualizarse. La licencia completa está en https://open-meteo.com/en/licence — se recomienda incluir el enlace en cualquier interfaz pública del proyecto que muestre datos de Open-Meteo.
