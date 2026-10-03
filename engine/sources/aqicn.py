@@ -29,7 +29,7 @@ silencia el log de httpx (que imprime cada URL) y NUNCA incluye URLs ni
 parámetros en sus mensajes de error.
 
 Prueba manual (desde engine/, con el venv activo):
-    python -m sources.aqicn crudo      # forma real de una respuesta (solo claves)
+    python -m sources.aqicn crudo      # forma real de una respuesta (claves + forecast)
     python -m sources.aqicn cobertura  # caja entera vs. descubrimiento por partes
     python -m sources.aqicn          # muestra: hasta 5 estaciones activas
     python -m sources.aqicn todas    # descarga completa + resumen
@@ -80,7 +80,6 @@ MARCA_PAIS = "colombia"
 # en una caja). MAX_CAJAS es un freno de seguridad contra un bucle sin fin.
 LADO_MIN_GRADOS = 0.5
 MAX_CAJAS = 400
-
 INTERVALO_MIN_S = 0.2   # cupo generoso; este espaciado es solo cortesía
 MAX_REINTENTOS = 3
 ESPERA_CUPO_S = 30      # espera ante un 429 o un "over quota"
@@ -138,7 +137,6 @@ def _a_utc(texto: str) -> datetime | None:
 
 def _hora_de_medicion(t: Any) -> datetime | None:
     """Objeto `time` del feed -> UTC. Prueba 'iso' y, si falta, 's' + 'tz'.
-
     NO se usa el campo 'v': aunque parece un epoch, es la hora LOCAL del reloj
     codificada como si fuera UTC (en Bogotá adelanta la hora 5 h hacia atrás).
     Sin 'iso' ni 's'+'tz' devolvemos None: sin zona horaria no adivinamos.
@@ -337,7 +335,6 @@ class ClienteAQICN:
     @staticmethod
     def _sin_actividad_segun_mapa(item: dict[str, Any], ahora: datetime) -> bool:
         """True si /map/bounds ya dice que la última hora es más vieja que la ventana.
-
         Si no trae hora, o no se entiende, NO se decide acá: se pregunta al feed.
         """
         texto = (item.get("station") or {}).get("time")
@@ -359,7 +356,6 @@ class ClienteAQICN:
         if medido_en is None:
             # Sin hora no hay lectura válida: `medido_en` es parte de la clave única.
             raise AQICNError(f"feed de {uid} sin hora de medición interpretable")
-
         lecturas: list[LecturaNormalizada] = []
         iaqi = datos.get("iaqi") or {}
         for contaminante in CONTAMINANTES_IAQI:
@@ -379,13 +375,13 @@ class ClienteAQICN:
 
         `limite`: pedir `/feed` como máximo a N estaciones (pruebas manuales).
         Las inactivas y las descartadas no cuentan: no cuestan requests.
+
         Si falla el listado inicial la excepción sube (no hay nada que
         ingerir); si falla una estación, se registra y se sigue.
         """
         items = self._descubrir()
         resultado = ResultadoDescarga(fuente=FUENTE, ubicaciones_vistas=len(items))
         self.muestra_descartes = []
-
         for it in items:
             if isinstance(it, dict):
                 lat, lon = _numero(it.get("lat")), _numero(it.get("lon"))
@@ -393,7 +389,6 @@ class ClienteAQICN:
                     resultado.fuera_de_caja += 1
         if resultado.fuera_de_caja:
             logger.warning("%d estaciones quedaron fuera de %s", resultado.fuera_de_caja, BBOX_COLOMBIA)
-
         ahora = datetime.now(timezone.utc)
         consultadas = 0
         for item in items:
@@ -409,13 +404,11 @@ class ClienteAQICN:
             except (KeyError, TypeError, ValueError, AttributeError) as exc:
                 resultado.fallos.append(FalloEstacion(str(item)[:40], f"elemento mal formado: {exc!r}"))
                 continue
-
             if self._sin_actividad_segun_mapa(item, ahora):
                 estacion.activa = False
                 resultado.estaciones.append(estacion)
                 resultado.sin_actividad_reciente += 1
                 continue
-
             consultadas += 1
             try:
                 lecturas, medido_en = self._leer_feed(estacion.id_externo)
@@ -427,7 +420,6 @@ class ClienteAQICN:
                 resultado.fallos.append(FalloEstacion(estacion.id_externo, str(exc)))
                 logger.warning("Estación %s omitida: %s", estacion.id_externo, exc)
                 continue
-
             vieja = ahora - medido_en > timedelta(days=VENTANA_ACTIVIDAD_DIAS)
             if vieja or not lecturas:
                 estacion.activa = False  # se registra, sin lecturas
@@ -435,13 +427,56 @@ class ClienteAQICN:
             else:
                 estacion.lecturas = lecturas
             resultado.estaciones.append(estacion)
-
         logger.info(
             "AQICN: %d registradas (%d sin actividad reciente), %d fallidas, %d descartadas, %d requests.",
             len(resultado.estaciones), resultado.sin_actividad_reciente, len(resultado.fallos),
             sum(resultado.descartadas.values()), self.n_requests,
         )
         return resultado
+
+
+def _imprimir_forecast(forecast: Any) -> None:
+    """Diagnóstico: forma real del `forecast` del feed, sin guardar nada.
+
+    Solo imprime la ESTRUCTURA (qué contaminantes, qué claves por día, qué
+    fechas) para poder escribir el parser del Bloque 2 con datos reales y no
+    con la forma esperada. No se usa desde `descargar()`: es exclusivo de la
+    prueba manual `python -m sources.aqicn crudo`.
+
+    Todo lo que imprime son FORMAS (nombres de claves, tipos, fechas), no
+    valores sensibles: el token de AQICN no viaja en el `forecast`, así que
+    esto es seguro incluso pegado en un chat de debugging.
+    """
+    if forecast is None:
+        print("   forecast: ausente")
+        return
+    if not isinstance(forecast, dict):
+        print(f"   forecast: tipo inesperado ({type(forecast).__name__})")
+        return
+
+    print(f"   forecast: claves raíz = {sorted(forecast)}")
+    daily = forecast.get("daily")
+    if not isinstance(daily, dict):
+        print(f"   forecast.daily: ausente o no es dict (tipo {type(daily).__name__})")
+        return
+
+    print(f"   forecast.daily: contaminantes = {sorted(daily)}")
+    for contaminante in sorted(daily):
+        items = daily[contaminante]
+        if not isinstance(items, list) or not items:
+            print(f"     - {contaminante}: sin items utilizables")
+            continue
+        primer, ultimo = items[0], items[-1]
+        # Claves del primer item; si el último tiene alguna distinta, se
+        # reporta: puede pasar entre el día de hoy y el horizonte lejano.
+        claves_primero = sorted(primer) if isinstance(primer, dict) else type(primer).__name__
+        claves_ultimo = sorted(ultimo) if isinstance(ultimo, dict) else type(ultimo).__name__
+        print(
+            f"     - {contaminante}: {len(items)} items | "
+            f"primer item = {primer!r} | claves = {claves_primero}"
+        )
+        if claves_ultimo != claves_primero:
+            print(f"       (último item con claves distintas: {claves_ultimo})")
 
 
 def _crudo() -> None:
@@ -464,12 +499,11 @@ def _crudo() -> None:
         print("   time:", datos.get("time"))
         print("   aqi:", repr(datos.get("aqi")), "| dominentpol:", datos.get("dominentpol"))
         print("   iaqi:", {k: (v or {}).get("v") for k, v in (datos.get("iaqi") or {}).items()})
-        print("   forecast presente:", "forecast" in datos, "(se ignora en M3)")
+        _imprimir_forecast(datos.get("forecast"))
 
 
 def _cobertura() -> None:
     """Compara la caja entera contra el descubrimiento por partes, y muestra la convergencia."""
-
     def es_col(it: Any) -> bool:
         return isinstance(it, dict) and MARCA_PAIS in str((it.get("station") or {}).get("name", "")).lower()
 
@@ -500,10 +534,8 @@ def _probar() -> None:
         _cobertura()
         return
     completa = "todas" in sys.argv[1:]
-
     with ClienteAQICN() as cliente:
         r = cliente.descargar(limite=None if completa else 5)
-
     activas = [e for e in r.estaciones if e.activa]
     print(f"\nEstaciones descubiertas: {r.ubicaciones_vistas} en {cliente.cajas_consultadas} cajas "
           f"(fallidas: {cliente.cajas_fallidas}; fuera de la caja: {r.fuera_de_caja})")
@@ -515,7 +547,6 @@ def _probar() -> None:
         print(f"   FALLO {f.id_externo}: {f.motivo}")
     if r.abortada:
         print(f"ABORTADA: {r.abortada}")
-
     # Para vigilar la heurística de país: ¿se está descartando algo colombiano?
     if cliente.muestra_descartes:
         print("\nNombres DESCARTADOS por no decir 'colombia' (revisá que ninguno sea colombiano):")
@@ -523,7 +554,6 @@ def _probar() -> None:
             print(f"   - {n}")
         if len(cliente.muestra_descartes) > 15:
             print(f"   ... y {len(cliente.muestra_descartes) - 15} más")
-
     detalle = activas if completa else activas[:5]
     if not completa:
         for e in detalle:
@@ -531,7 +561,6 @@ def _probar() -> None:
             for lec in sorted(e.lecturas, key=lambda x: x.contaminante):
                 print(f"   {lec.contaminante:<5} {lec.valor:>8.1f} {lec.unidad:<4} {lec.medido_en.isoformat()}")
         return
-
     contaminantes: Counter = Counter(lec.contaminante for e in activas for lec in e.lecturas)
     print(f"\nLecturas por contaminante (solo estaciones activas): {dict(contaminantes)}")
     print("Estaciones activas:")
