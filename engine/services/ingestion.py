@@ -6,46 +6,45 @@ Separación de responsabilidades (por qué esto NO vive en los clientes):
     sources/siata.py) sabe hablar con UNA fuente y traducir su formato a
     `sources.tipos`. No conoce la base de datos.
   - Este SERVICIO sabe hablar con la base de datos. No conoce ninguna
-    API: solo recibe un `ResultadoDescarga` (la forma intermedia común).
+    API: solo recibe un `ResultadoDescarga`.
 
-Así se puede probar la ingestión sin red (con datos armados a mano),
-probar un cliente sin base, y sumar una fuente nueva (M4) sin tocar nada
-de acá: solo tiene que devolver el mismo `ResultadoDescarga`.
+Tres operaciones, tres estrategias distintas:
+  ESTACIONES -> UPSERT. Si (fuente, id_externo) ya existe, se actualiza;
+    si no, se inserta. Lo resuelve la base en una operación atómica, sin
+    hueco entre "mirar si existe" y "escribir".
+  LECTURAS -> INSERT ... ON CONFLICT DO NOTHING. Append-only: solo se
+    agregan, nunca se corrigen ni se borran; son el registro histórico de
+    qué dijo cada fuente y cuándo.
+  PRONÓSTICOS (M5b) -> INSERT ... ON CONFLICT DO UPDATE. El UNIQUE
+    (estacion_id, contaminante, fecha_objetivo, fecha_captura) hace que
+    recapturar el mismo día sobrescriba con la versión más reciente. Por
+    cada pronóstico se crea además una fila `pendiente` en
+    `auditorias_pronostico` (DO NOTHING: no se toca una auditoría ya
+    existente, que puede estar resuelta).
 
-Dos operaciones, dos estrategias distintas:
-  ESTACIONES -> UPSERT (INSERT ... ON CONFLICT DO UPDATE). "Upsert" es
-    "update or insert": si la estación (fuente, id_externo) no existe se
-    inserta; si ya existe se actualiza. ON CONFLICT le dice a Postgres qué
-    hacer cuando el INSERT choca con una restricción UNIQUE, en vez de fallar.
-    Lo resuelve la propia base en una sola operación atómica, así que no hay
-    hueco entre "mirar si existe" y "escribir" en el que otro proceso pueda
-    colarse.
-  LECTURAS -> INSERT ... ON CONFLICT DO NOTHING. Las lecturas son
-    "append-only": solo se agregan, nunca se corrigen ni se borran; son el
-    registro de qué dijo cada fuente y cuándo. Si la misma lectura
-    (estación, contaminante, medido_en) ya está guardada, no se pisa: se
-    ignora. Acá no se está corrigiendo historial, se está evitando duplicar
-    lo que ya tenemos (la ingestión periódica de M10 va a traer muchas veces
-    el mismo último valor). Con DO UPDATE se reescribiría un dato ya
-    registrado, y perder la fidelidad del historial es justo lo que un
-    registro append-only quiere evitar.
-
-Toda la ingestión de una fuente ocurre en UNA transacción: o entra todo o no
-entra nada.
+Toda la ingestión de una fuente ocurre en UNA transacción.
 """
 from __future__ import annotations
 
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from database.models import CONTAMINANTES, FUENTES, Estacion, Lectura, utcnow
+from database.models import (
+    CONTAMINANTES,
+    FUENTES,
+    AuditoriaPronostico,
+    Estacion,
+    Lectura,
+    Pronostico,
+    utcnow,
+)
 from sources.aqicn import ClienteAQICN
 from sources.iboca import ClienteIBOCA
 from sources.openaq import ClienteOpenAQ
@@ -55,6 +54,17 @@ from sources.tipos import EstacionNormalizada, ResultadoDescarga
 logger = logging.getLogger(__name__)
 
 LONGITUD_MAX_UNIDAD = 20  # columna lecturas.unidad = String(20)
+OFFSET_COLOMBIA = timezone(timedelta(hours=-5))  # Colombia sin DST
+
+
+def _fecha_local_colombia(instante_utc: datetime) -> date:
+    """Día calendario en hora local de Colombia para un instante UTC.
+
+    `pronosticos.fecha_captura` es un `date` en hora local de Colombia
+    (ver database/models.py): "hoy" para el proyecto es el día que ve un
+    colombiano, no el día UTC.
+    """
+    return instante_utc.astimezone(OFFSET_COLOMBIA).date()
 
 
 @dataclass
@@ -62,12 +72,20 @@ class ResumenIngestion:
     """Qué pasó en una ingestión. Es lo que devuelven los endpoints internos."""
     fuente: str
     estaciones_nuevas: int = 0
-    estaciones_actualizadas: int = 0   # ya existían y cambió nombre, coordenadas o `activa`
-    estaciones_sin_cambios: int = 0    # ya existían y solo se refrescó ultima_vez_vista
-    estaciones_sin_actividad: int = 0  # registradas como inactivas (activa=False)
+    estaciones_actualizadas: int = 0
+    estaciones_sin_cambios: int = 0
+    estaciones_sin_actividad: int = 0
     lecturas_insertadas: int = 0
-    lecturas_duplicadas: int = 0       # ya estaban guardadas: DO NOTHING las ignoró
-    lecturas_invalidas: int = 0        # descartadas antes de escribir (dato mal formado)
+    lecturas_duplicadas: int = 0
+    lecturas_invalidas: int = 0
+    pronosticos_guardados: int = 0
+    pronosticos_actualizados: int = 0
+    # Total de items descartados + desglose. Por ahora la única causa que
+    # dispara el total es `por_fecha` (días pasados); el resto son items
+    # que el parser ya descartó antes de llegar acá (uvi, fecha ilegible).
+    pronosticos_descartados: int = 0
+    pronosticos_descartados_por_fecha: int = 0
+    auditorias_pendientes_creadas: int = 0
     estaciones_fallidas: list[dict[str, str]] = field(default_factory=list)
     estaciones_descartadas: dict[str, int] = field(default_factory=dict)
     abortada: str | None = None
@@ -82,6 +100,11 @@ class ResumenIngestion:
             "lecturas_insertadas": self.lecturas_insertadas,
             "lecturas_duplicadas": self.lecturas_duplicadas,
             "lecturas_invalidas": self.lecturas_invalidas,
+            "pronosticos_guardados": self.pronosticos_guardados,
+            "pronosticos_actualizados": self.pronosticos_actualizados,
+            "pronosticos_descartados": self.pronosticos_descartados,
+            "pronosticos_descartados_por_fecha": self.pronosticos_descartados_por_fecha,
+            "auditorias_pendientes_creadas": self.auditorias_pendientes_creadas,
             "estaciones_fallidas": self.estaciones_fallidas,
             "estaciones_descartadas": self.estaciones_descartadas,
             "abortada": self.abortada,
@@ -103,13 +126,9 @@ def _upsert_estaciones(
     resumen: ResumenIngestion,
 ) -> dict[str, int]:
     """Inserta o actualiza las estaciones. Devuelve {id_externo: id en nuestra base}."""
-    # Si una fuente repitiera una estación, el segundo INSERT del mismo lote
-    # chocaría consigo mismo: nos quedamos con la última aparición.
     unicas = list({e.id_externo: e for e in estaciones}.values())
     if not unicas:
         return {}
-
-    # Paso 1, solo para CONTAR (nuevas / cambiadas / sin cambios): mirar qué hay.
     existentes = {
         f.id_externo: f
         for f in db.execute(
@@ -129,9 +148,6 @@ def _upsert_estaciones(
             resumen.estaciones_sin_cambios += 1
         if not e.activa:
             resumen.estaciones_sin_actividad += 1
-
-    # Paso 2, el que ESCRIBE: el upsert real. El paso 1 es informativo; la
-    # seguridad frente a una carrera la da ON CONFLICT, no esa lectura previa.
     filas = [
         {"fuente": fuente, "id_externo": e.id_externo, "nombre": e.nombre,
          "latitud": e.latitud, "longitud": e.longitud, "activa": e.activa,
@@ -141,8 +157,6 @@ def _upsert_estaciones(
     stmt = insert(Estacion).values(filas)
     stmt = stmt.on_conflict_do_update(
         index_elements=[Estacion.fuente, Estacion.id_externo],
-        # `excluded` = la fila que se intentó insertar. Ojo con lo que NO está
-        # en esta lista: primera_vez_vista se conserva tal cual estaba.
         set_={
             "nombre": stmt.excluded.nombre,
             "latitud": stmt.excluded.latitud,
@@ -188,11 +202,108 @@ def _insertar_lecturas(
         .on_conflict_do_nothing(
             index_elements=[Lectura.estacion_id, Lectura.contaminante, Lectura.medido_en]
         )
-        .returning(Lectura.id)  # con DO NOTHING, RETURNING devuelve SOLO las filas que entraron
+        .returning(Lectura.id)
     )
     insertadas = len(db.execute(stmt).all())
     resumen.lecturas_insertadas += insertadas
     resumen.lecturas_duplicadas += len(filas) - insertadas
+
+
+def _upsert_pronosticos(
+    db: Session, fuente: str, estaciones: list[EstacionNormalizada],
+    ids: dict[str, int], fecha_captura: date, ahora: datetime,
+    resumen: ResumenIngestion,
+) -> None:
+    """Escribe pronósticos de AQICN y crea una auditoría pendiente por cada uno.
+
+    Filtra los días ya pasados (`fecha_objetivo < fecha_captura`): AQICN
+    mezcla en su `forecast.daily` días pasados (observados) con futuros
+    (proyectados). Los pasados no son pronóstico y no se guardan como
+    tales. El desglose del descarte queda en
+    `pronosticos_descartados_por_fecha`.
+
+    Idempotente por el UNIQUE de `pronosticos`: recapturar el mismo día
+    actualiza los valores; crear la auditoría asociada usa DO NOTHING, así
+    que una auditoría ya resuelta no se pisa.
+    """
+    filas: list[dict[str, Any]] = []
+    for e in estaciones:
+        estacion_id = ids.get(e.id_externo)
+        if estacion_id is None:
+            continue
+        for p in e.pronosticos:
+            if p.contaminante not in CONTAMINANTES:
+                resumen.pronosticos_descartados += 1
+                continue
+            if p.fecha_objetivo < fecha_captura:
+                resumen.pronosticos_descartados += 1
+                resumen.pronosticos_descartados_por_fecha += 1
+                continue
+            filas.append({
+                "fuente": fuente,
+                "estacion_id": estacion_id,
+                "contaminante": p.contaminante,
+                "fecha_objetivo": p.fecha_objetivo,
+                "valor_promedio": p.valor_promedio,
+                "valor_min": p.valor_min,
+                "valor_max": p.valor_max,
+                "fecha_captura": fecha_captura,
+                "capturado_en": ahora,
+            })
+    if not filas:
+        return
+
+    # Deduplicar por la clave única: si la misma corrida repitiera una fila,
+    # el segundo INSERT del lote chocaría consigo mismo.
+    unicas = list({
+        (f["estacion_id"], f["contaminante"], f["fecha_objetivo"], f["fecha_captura"]): f
+        for f in filas
+    }.values())
+
+    # Informativo: contar nuevos vs actualizados (mismo patrón que estaciones).
+    ids_estacion = {f["estacion_id"] for f in unicas}
+    existentes = {
+        (fila.estacion_id, fila.contaminante, fila.fecha_objetivo, fila.fecha_captura)
+        for fila in db.execute(
+            select(
+                Pronostico.estacion_id, Pronostico.contaminante,
+                Pronostico.fecha_objetivo, Pronostico.fecha_captura,
+            ).where(Pronostico.estacion_id.in_(ids_estacion))
+        )
+    }
+    for f in unicas:
+        clave = (f["estacion_id"], f["contaminante"], f["fecha_objetivo"], f["fecha_captura"])
+        if clave in existentes:
+            resumen.pronosticos_actualizados += 1
+        else:
+            resumen.pronosticos_guardados += 1
+
+    stmt = insert(Pronostico).values(unicas)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[
+            Pronostico.estacion_id, Pronostico.contaminante,
+            Pronostico.fecha_objetivo, Pronostico.fecha_captura,
+        ],
+        set_={
+            "valor_promedio": stmt.excluded.valor_promedio,
+            "valor_min": stmt.excluded.valor_min,
+            "valor_max": stmt.excluded.valor_max,
+            "capturado_en": stmt.excluded.capturado_en,
+        },
+    ).returning(Pronostico.id)
+
+    ids_pronosticos = [r.id for r in db.execute(stmt)]
+
+    # Una auditoría pendiente por pronóstico, solo si no existe ya.
+    filas_auditoria = [
+        {"pronostico_id": pid, "estado": "pendiente"} for pid in ids_pronosticos
+    ]
+    stmt_aud = (
+        insert(AuditoriaPronostico).values(filas_auditoria)
+        .on_conflict_do_nothing(index_elements=[AuditoriaPronostico.pronostico_id])
+        .returning(AuditoriaPronostico.id)
+    )
+    resumen.auditorias_pendientes_creadas += len(db.execute(stmt_aud).all())
 
 
 def ingerir(db: Session, resultado: ResultadoDescarga, *, ahora: datetime | None = None) -> ResumenIngestion:
@@ -200,6 +311,7 @@ def ingerir(db: Session, resultado: ResultadoDescarga, *, ahora: datetime | None
     if resultado.fuente not in FUENTES:
         raise ValueError(f"Fuente desconocida: {resultado.fuente!r} (válidas: {FUENTES})")
     ahora = ahora or utcnow()
+    fecha_captura = _fecha_local_colombia(ahora)
     resumen = ResumenIngestion(
         fuente=resultado.fuente,
         estaciones_fallidas=[{"id_externo": f.id_externo, "motivo": f.motivo} for f in resultado.fallos],
@@ -209,15 +321,15 @@ def ingerir(db: Session, resultado: ResultadoDescarga, *, ahora: datetime | None
     try:
         ids = _upsert_estaciones(db, resultado.fuente, resultado.estaciones, ahora, resumen)
         _insertar_lecturas(db, resultado.estaciones, ids, ahora, resumen)
+        _upsert_pronosticos(db, resultado.fuente, resultado.estaciones, ids, fecha_captura, ahora, resumen)
         db.commit()
     except Exception:
-        db.rollback()  # o entra todo o no entra nada
+        db.rollback()
         raise
     logger.info("Ingestión %s: %s", resultado.fuente, resumen.a_dict())
     return resumen
 
 
-# --- Orquestadores: descargar (cliente) + escribir (servicio) ----------------
 def ejecutar_openaq(db: Session) -> ResumenIngestion:
     with ClienteOpenAQ() as cliente:
         resultado = cliente.descargar()

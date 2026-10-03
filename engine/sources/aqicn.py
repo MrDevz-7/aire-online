@@ -13,16 +13,21 @@ Flujo de una descarga completa (`descargar()`):
      el país y la caja cae sobre países vecinos; se filtra por la marca
      "colombia" en el nombre (heurística: ver MARCA_PAIS).
   2. Por cada estación de Colombia con actividad reciente:
-     GET /feed/@{uid}/ -> `iaqi` (un valor por contaminante) y el `aqi`
-     compuesto, con la hora de la medición.
+     GET /feed/@{uid}/ -> `iaqi` (un valor por contaminante), el `aqi`
+     compuesto y, desde M5b, el `forecast` con los días futuros.
 
 Lo que hay que entender de los VALORES: AQICN NO entrega concentraciones
 (µg/m³, ppm) sino ÍNDICES de calidad del aire (escala AQI, sin unidad) por
-contaminante. Se guardan tal cual, con unidad "AQI". Compararlos con las
-concentraciones de OpenAQ requiere una conversión, y eso es de M5.
+contaminante. Se guardan tal cual, con unidad "AQI". El `forecast` sigue
+la misma escala: son valores AQI proyectados.
 
-Fuera de alcance en M3: el pronóstico (`forecast`) que a veces trae el feed
-se ignora por completo. Es de M5/M6.
+Sobre el `forecast` (M5b): es una lista de días POR CONTAMINANTE. AQICN
+mezcla días ya pasados (los últimos 2-3, ya observados) con días futuros
+(los próximos 3-5, proyectados). Este cliente los traduce TODOS a
+`PronosticoNormalizado` sin filtrar por fecha: decidir "el pasado no es
+pronóstico" es una regla de negocio que aplica la capa de ingestión, no
+este traductor. El índice UV (`uvi`) SÍ se descarta acá, porque no es un
+contaminante del aire en este proyecto.
 
 Seguridad: el token viaja en la URL (?token=...). Por eso este módulo
 silencia el log de httpx (que imprime cada URL) y NUNCA incluye URLs ni
@@ -40,7 +45,7 @@ import logging
 import sys
 import time
 from collections import Counter, deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -52,37 +57,25 @@ from sources.tipos import (
     EstacionNormalizada,
     FalloEstacion,
     LecturaNormalizada,
+    PronosticoNormalizado,
     ResultadoDescarga,
 )
 
-# httpx registra "GET <url completa>" a nivel INFO, y acá la URL lleva el token.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 FUENTE = "aqicn"
 BASE_URL = "https://api.waqi.info"
 
-# Contaminantes que se toman de `iaqi`. El resto de sus claves (humedad,
-# presión, temperatura, viento, índice UV, etc.) no son contaminantes: se ignoran.
 CONTAMINANTES_IAQI = ("pm25", "pm10", "o3", "no2", "so2", "co")
-
-# AQICN no informa unidad porque los valores son índices. La columna
-# `unidad` es NOT NULL, así que se guarda el nombre de la escala.
 UNIDAD = "AQI"
-
-# /map/bounds no informa el país. Los nombres de WAQI suelen terminar en el
-# país ("..., Bogota, Colombia"), así que esa marca decide. Es una heurística:
-# la prueba manual lista lo descartado para detectar falsos negativos.
 MARCA_PAIS = "colombia"
 
-# Descubrimiento por partes: se subdivide una caja mientras devuelva estaciones
-# y su lado mida más que esto (0.5 grados ~ 55 km: un área metropolitana cabe
-# en una caja). MAX_CAJAS es un freno de seguridad contra un bucle sin fin.
 LADO_MIN_GRADOS = 0.5
 MAX_CAJAS = 400
-INTERVALO_MIN_S = 0.2   # cupo generoso; este espaciado es solo cortesía
+INTERVALO_MIN_S = 0.2
 MAX_REINTENTOS = 3
-ESPERA_CUPO_S = 30      # espera ante un 429 o un "over quota"
+ESPERA_CUPO_S = 30
 
 
 class AQICNError(Exception):
@@ -131,7 +124,7 @@ def _a_utc(texto: str) -> datetime | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        return None  # sin zona horaria no sabemos qué hora es: no adivinamos
+        return None
     return dt.astimezone(timezone.utc)
 
 
@@ -139,7 +132,6 @@ def _hora_de_medicion(t: Any) -> datetime | None:
     """Objeto `time` del feed -> UTC. Prueba 'iso' y, si falta, 's' + 'tz'.
     NO se usa el campo 'v': aunque parece un epoch, es la hora LOCAL del reloj
     codificada como si fuera UTC (en Bogotá adelanta la hora 5 h hacia atrás).
-    Sin 'iso' ni 's'+'tz' devolvemos None: sin zona horaria no adivinamos.
     """
     if not isinstance(t, dict):
         return None
@@ -154,6 +146,59 @@ def _hora_de_medicion(t: Any) -> datetime | None:
     return None
 
 
+def _fecha_de_dia(valor: Any) -> date | None:
+    """'2026-09-30' -> date. None si no es una fecha ISO de día completo."""
+    if not isinstance(valor, str):
+        return None
+    try:
+        return date.fromisoformat(valor.strip())
+    except ValueError:
+        return None
+
+
+def _parsear_forecast(forecast: Any) -> list[PronosticoNormalizado]:
+    """forecast.daily -> lista de PronosticoNormalizado.
+
+    Recorre TODOS los items que traiga, sin filtrar por fecha: eso lo
+    decide la capa de ingestión, que conoce la fecha de captura. Descarta
+    acá lo que es estructuralmente distinto:
+      - Claves que no son contaminantes (el caso concreto: 'uvi').
+      - Items sin `day` parseable como fecha ISO.
+      - Items con avg/min/max todos nulos: no hay nada que guardar.
+    """
+    if not isinstance(forecast, dict):
+        return []
+    daily = forecast.get("daily")
+    if not isinstance(daily, dict):
+        return []
+
+    pronosticos: list[PronosticoNormalizado] = []
+    for contaminante, items in daily.items():
+        if contaminante not in CONTAMINANTES_IAQI:
+            continue
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            dia = _fecha_de_dia(item.get("day"))
+            if dia is None:
+                continue
+            promedio = _numero(item.get("avg"))
+            minimo = _numero(item.get("min"))
+            maximo = _numero(item.get("max"))
+            if promedio is None and minimo is None and maximo is None:
+                continue
+            pronosticos.append(PronosticoNormalizado(
+                contaminante=contaminante,
+                fecha_objetivo=dia,
+                valor_promedio=promedio,
+                valor_min=minimo,
+                valor_max=maximo,
+            ))
+    return pronosticos
+
+
 class ClienteAQICN:
     def __init__(
         self,
@@ -161,8 +206,6 @@ class ClienteAQICN:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         valor = settings.AQICN_TOKEN if token is None else token
-        # Guard clause: sin token no armamos el cliente. .strip() protege de
-        # espacios o saltos de línea (\r) pegados en el .env de Windows.
         if not valor.strip():
             raise AQICNConfigError(
                 "Falta AQICN_TOKEN. Definilo en engine/.env (ver engine/.env.example)."
@@ -172,12 +215,12 @@ class ClienteAQICN:
             base_url=BASE_URL,
             headers={"Accept": "application/json"},
             timeout=httpx.Timeout(20.0, connect=10.0),
-            transport=transport,  # None = red real; en pruebas se inyecta una simulada
+            transport=transport,
         )
         self._proximo_permitido = 0.0
         self.n_requests = 0
-        self.muestra_descartes: list[str] = []  # diagnóstico: nombres descartados
-        self.cajas_consultadas = 0              # diagnóstico del descubrimiento
+        self.muestra_descartes: list[str] = []
+        self.cajas_consultadas = 0
         self.cajas_fallidas = 0
         self.nuevas_por_nivel: dict[int, int] = {}
 
@@ -190,9 +233,6 @@ class ClienteAQICN:
     def close(self) -> None:
         self._http.close()
 
-    # ------------------------------------------------------------------
-    # Capa HTTP
-    # ------------------------------------------------------------------
     def _esperar_turno(self) -> None:
         falta = self._proximo_permitido - time.monotonic()
         if falta > 0:
@@ -202,14 +242,9 @@ class ClienteAQICN:
     def _get(self, ruta: str, params: dict[str, Any] | None = None) -> Any:
         """GET que devuelve el campo `data` de una respuesta con status "ok".
 
-        AQICN responde HTTP 200 incluso para los errores; la verdad está en el
-        campo `status` del JSON:
-          - "ok"                          -> devuelve `data`.
-          - "error" + mensaje con "key"   -> AQICNAuthError (reintentar no sirve).
-          - "error" + mensaje con "quota" -> espera y reintenta.
-          - "error" + otro mensaje        -> AQICNError de inmediato (p. ej. "Unknown
-                                             station": es de esa estación).
-          - cualquier otro status         -> se trata como transitorio y se reintenta.
+        AQICN responde HTTP 200 incluso para los errores; la verdad está en
+        el campo `status` del JSON. Ver política de reintentos y cortes en
+        el cuerpo del método.
         """
         consulta = {**(params or {}), "token": self._token}
         ultimo_error: AQICNError | None = None
@@ -218,8 +253,7 @@ class ClienteAQICN:
             espera = 2 ** intento
             try:
                 resp = self._http.get(ruta, params=consulta)
-            except httpx.TransportError as exc:  # timeout, DNS, conexión cortada
-                # Solo el nombre de la clase: el texto de la excepción puede traer la URL.
+            except httpx.TransportError as exc:
                 ultimo_error = AQICNError(f"error de red en {ruta}: {exc.__class__.__name__}")
             else:
                 self.n_requests += 1
@@ -259,9 +293,6 @@ class ClienteAQICN:
         assert ultimo_error is not None
         raise ultimo_error
 
-    # ------------------------------------------------------------------
-    # Descubrimiento
-    # ------------------------------------------------------------------
     def _listar_estaciones(self, caja: Caja = BBOX_COLOMBIA) -> list[Any]:
         datos = self._get("/map/bounds/", {"latlng": latlng_aqicn(caja)})
         if not isinstance(datos, list):
@@ -271,15 +302,10 @@ class ClienteAQICN:
     def _descubrir(self) -> list[dict[str, Any]]:
         """Estaciones de toda la caja de Colombia, consultando por partes.
 
-        Recorre las cajas por niveles (búsqueda en anchura): pide la caja
-        entera, y por cada caja que devuelve estaciones y aún es grande, pide
-        sus 4 cuadrantes. Une por `uid`, así que una estación que aparece en
-        varias consultas se cuenta una sola vez. Una caja que devuelve 0 no se
-        subdivide: no hay nada adentro.
-
-        Si falla la caja raíz, la excepción sube. Si falla una sub-caja, se
-        avisa y se sigue (queda contada en `cajas_fallidas`); un error de token
-        o de cupo sí corta todo.
+        Búsqueda en anchura: pide la caja entera, y por cada caja que
+        devuelve estaciones y aún es grande, pide sus 4 cuadrantes. Une por
+        `uid`. Si falla la caja raíz, la excepción sube. Si falla una
+        sub-caja, se avisa y se sigue; un error de token o de cupo sí corta.
         """
         vistas: dict[Any, dict[str, Any]] = {}
         nuevas: Counter = Counter()
@@ -341,40 +367,39 @@ class ClienteAQICN:
         hora = _a_utc(texto) if isinstance(texto, str) else None
         return hora is not None and ahora - hora > timedelta(days=VENTANA_ACTIVIDAD_DIAS)
 
-    # ------------------------------------------------------------------
-    # Detalle de una estación
-    # ------------------------------------------------------------------
-    def _leer_feed(self, uid: str) -> tuple[list[LecturaNormalizada], datetime]:
-        """GET /feed/@{uid}/ -> (lecturas, hora de la medición en UTC).
+    def _leer_feed(
+        self, uid: str
+    ) -> tuple[list[LecturaNormalizada], datetime, list[PronosticoNormalizado]]:
+        """GET /feed/@{uid}/ -> (lecturas, hora de la medición, pronósticos).
 
-        No toca `forecast`: aunque venga en la respuesta, se ignora.
+        Los pronósticos pueden venir vacíos (fuente sin forecast, o con
+        todos los items descartados por el parser); nunca es un error.
         """
         datos = self._get(f"/feed/@{uid}/")
         if not isinstance(datos, dict):
             raise AQICNError(f"feed de {uid} sin datos")
         medido_en = _hora_de_medicion(datos.get("time"))
         if medido_en is None:
-            # Sin hora no hay lectura válida: `medido_en` es parte de la clave única.
             raise AQICNError(f"feed de {uid} sin hora de medición interpretable")
+
         lecturas: list[LecturaNormalizada] = []
         iaqi = datos.get("iaqi") or {}
         for contaminante in CONTAMINANTES_IAQI:
             valor = _numero((iaqi.get(contaminante) or {}).get("v"))
             if valor is not None:
                 lecturas.append(LecturaNormalizada(contaminante, valor, UNIDAD, medido_en))
-        indice = _numero(datos.get("aqi"))  # índice compuesto de la estación
+        indice = _numero(datos.get("aqi"))
         if indice is not None:
             lecturas.append(LecturaNormalizada("aqi", indice, UNIDAD, medido_en))
-        return lecturas, medido_en
 
-    # ------------------------------------------------------------------
-    # Descarga completa
-    # ------------------------------------------------------------------
+        pronosticos = _parsear_forecast(datos.get("forecast"))
+        return lecturas, medido_en, pronosticos
+
     def descargar(self, limite: int | None = None) -> ResultadoDescarga:
-        """Descubre estaciones de Colombia y trae su estado actual.
+        """Descubre estaciones de Colombia y trae su estado actual más el forecast.
 
-        `limite`: pedir `/feed` como máximo a N estaciones (pruebas manuales).
-        Las inactivas y las descartadas no cuentan: no cuestan requests.
+        `limite`: pedir `/feed` como máximo a N estaciones (pruebas
+        manuales). Las inactivas y las descartadas no cuentan.
 
         Si falla el listado inicial la excepción sube (no hay nada que
         ingerir); si falla una estación, se registra y se sigue.
@@ -411,7 +436,7 @@ class ClienteAQICN:
                 continue
             consultadas += 1
             try:
-                lecturas, medido_en = self._leer_feed(estacion.id_externo)
+                lecturas, medido_en, pronosticos = self._leer_feed(estacion.id_externo)
             except (AQICNAuthError, AQICNRateLimitError) as exc:
                 resultado.abortada = str(exc)
                 logger.error("Descarga abortada: %s", exc)
@@ -422,10 +447,11 @@ class ClienteAQICN:
                 continue
             vieja = ahora - medido_en > timedelta(days=VENTANA_ACTIVIDAD_DIAS)
             if vieja or not lecturas:
-                estacion.activa = False  # se registra, sin lecturas
+                estacion.activa = False
                 resultado.sin_actividad_reciente += 1
             else:
                 estacion.lecturas = lecturas
+                estacion.pronosticos = pronosticos
             resultado.estaciones.append(estacion)
         logger.info(
             "AQICN: %d registradas (%d sin actividad reciente), %d fallidas, %d descartadas, %d requests.",
@@ -438,14 +464,9 @@ class ClienteAQICN:
 def _imprimir_forecast(forecast: Any) -> None:
     """Diagnóstico: forma real del `forecast` del feed, sin guardar nada.
 
-    Solo imprime la ESTRUCTURA (qué contaminantes, qué claves por día, qué
-    fechas) para poder escribir el parser del Bloque 2 con datos reales y no
-    con la forma esperada. No se usa desde `descargar()`: es exclusivo de la
-    prueba manual `python -m sources.aqicn crudo`.
-
-    Todo lo que imprime son FORMAS (nombres de claves, tipos, fechas), no
-    valores sensibles: el token de AQICN no viaja en el `forecast`, así que
-    esto es seguro incluso pegado en un chat de debugging.
+    Solo imprime la ESTRUCTURA (qué contaminantes, qué días, qué claves)
+    para poder ajustar el parser con datos reales. Exclusivo de la prueba
+    manual `python -m sources.aqicn crudo`.
     """
     if forecast is None:
         print("   forecast: ausente")
@@ -453,30 +474,21 @@ def _imprimir_forecast(forecast: Any) -> None:
     if not isinstance(forecast, dict):
         print(f"   forecast: tipo inesperado ({type(forecast).__name__})")
         return
-
     print(f"   forecast: claves raíz = {sorted(forecast)}")
     daily = forecast.get("daily")
     if not isinstance(daily, dict):
         print(f"   forecast.daily: ausente o no es dict (tipo {type(daily).__name__})")
         return
-
     print(f"   forecast.daily: contaminantes = {sorted(daily)}")
     for contaminante in sorted(daily):
         items = daily[contaminante]
         if not isinstance(items, list) or not items:
             print(f"     - {contaminante}: sin items utilizables")
             continue
-        primer, ultimo = items[0], items[-1]
-        # Claves del primer item; si el último tiene alguna distinta, se
-        # reporta: puede pasar entre el día de hoy y el horizonte lejano.
-        claves_primero = sorted(primer) if isinstance(primer, dict) else type(primer).__name__
-        claves_ultimo = sorted(ultimo) if isinstance(ultimo, dict) else type(ultimo).__name__
-        print(
-            f"     - {contaminante}: {len(items)} items | "
-            f"primer item = {primer!r} | claves = {claves_primero}"
-        )
-        if claves_ultimo != claves_primero:
-            print(f"       (último item con claves distintas: {claves_ultimo})")
+        primer = items[0]
+        claves = sorted(primer) if isinstance(primer, dict) else type(primer).__name__
+        fechas = [it.get("day") if isinstance(it, dict) else None for it in items]
+        print(f"     - {contaminante}: {len(items)} items | fechas = {fechas} | claves = {claves}")
 
 
 def _crudo() -> None:
@@ -547,7 +559,6 @@ def _probar() -> None:
         print(f"   FALLO {f.id_externo}: {f.motivo}")
     if r.abortada:
         print(f"ABORTADA: {r.abortada}")
-    # Para vigilar la heurística de país: ¿se está descartando algo colombiano?
     if cliente.muestra_descartes:
         print("\nNombres DESCARTADOS por no decir 'colombia' (revisá que ninguno sea colombiano):")
         for n in cliente.muestra_descartes[:15]:
@@ -560,12 +571,17 @@ def _probar() -> None:
             print(f"\n[{e.id_externo}] {e.nombre} ({e.latitud:.4f}, {e.longitud:.4f})")
             for lec in sorted(e.lecturas, key=lambda x: x.contaminante):
                 print(f"   {lec.contaminante:<5} {lec.valor:>8.1f} {lec.unidad:<4} {lec.medido_en.isoformat()}")
+            for pro in sorted(e.pronosticos, key=lambda x: (x.contaminante, x.fecha_objetivo)):
+                print(f"   PRO {pro.contaminante:<5} {str(pro.fecha_objetivo):<10} "
+                      f"avg={pro.valor_promedio} min={pro.valor_min} max={pro.valor_max}")
         return
     contaminantes: Counter = Counter(lec.contaminante for e in activas for lec in e.lecturas)
     print(f"\nLecturas por contaminante (solo estaciones activas): {dict(contaminantes)}")
+    n_pronosticos = sum(len(e.pronosticos) for e in activas)
+    print(f"Pronósticos parseados (solo estaciones activas): {n_pronosticos}")
     print("Estaciones activas:")
     for e in activas:
-        print(f"   [{e.id_externo}] {e.nombre} -> {len(e.lecturas)} lecturas")
+        print(f"   [{e.id_externo}] {e.nombre} -> {len(e.lecturas)} lecturas, {len(e.pronosticos)} pronósticos")
 
 
 if __name__ == "__main__":

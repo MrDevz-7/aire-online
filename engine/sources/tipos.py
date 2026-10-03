@@ -1,11 +1,11 @@
 """
 Forma intermedia común de los datos de cualquier fuente.
 
-Cada cliente (OpenAQ, AQICN) habla con una API distinta y devuelve JSON
-distinto. Para que el resto del sistema no tenga que saber de esas
-diferencias, cada cliente TRADUCE su JSON a estas clases. La capa de
-ingestión (Bloque 3) solo conoce estas clases y la base de datos: nunca
-ve JSON de una API.
+Cada cliente (OpenAQ, AQICN, IBOCA, SIATA) habla con una API distinta y
+devuelve JSON distinto. Para que el resto del sistema no tenga que saber
+de esas diferencias, cada cliente TRADUCE su JSON a estas clases. La capa
+de ingestión solo conoce estas clases y la base de datos: nunca ve JSON
+de una API.
 
 Son dataclasses simples, sin lógica de negocio y sin dependencia de
 SQLAlchemy ni de httpx. Los valores y unidades se guardan TAL CUAL los
@@ -15,8 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
-
+from datetime import date, datetime
 
 # Política común a todas las fuentes: una estación cuyo último dato es más
 # viejo que esto se registra como inactiva (activa=False) y no se le piden
@@ -34,14 +33,31 @@ class LecturaNormalizada:
     medido_en: datetime  # con zona horaria, en UTC
 
 
+@dataclass(frozen=True)
+class PronosticoNormalizado:
+    """Un día pronosticado por una fuente para una estación.
+
+    `fecha_objetivo` es el día calendario local de la fuente (no un
+    instante): el "día que cubre" el pronóstico. `valor_promedio`, `min`
+    y `max` pueden ser None por separado según lo que publique la fuente;
+    una fuente que solo dé `avg` deja min/max en None, y no se inventan.
+    """
+    contaminante: str
+    fecha_objetivo: date
+    valor_promedio: float | None
+    valor_min: float | None
+    valor_max: float | None
+
+
 @dataclass
 class EstacionNormalizada:
-    fuente: str        # openaq | aqicn
+    fuente: str        # openaq | aqicn | iboca | siata
     id_externo: str    # id de la estación en esa fuente, como texto
     nombre: str
     latitud: float
     longitud: float
     lecturas: list[LecturaNormalizada] = field(default_factory=list)
+    pronosticos: list[PronosticoNormalizado] = field(default_factory=list)
     # False = la fuente no reporta datos recientes de esta estación: se
     # registra igual (mapa de cobertura), pero no se le piden lecturas.
     activa: bool = True
@@ -62,7 +78,6 @@ class ResultadoDescarga:
     descartada (`descartadas`: se decidió no usarla, por ejemplo por ser de
     otro país) o no alcanzada porque la descarga se abortó (`abortada`).
     """
-
     fuente: str
     estaciones: list[EstacionNormalizada] = field(default_factory=list)
     fallos: list[FalloEstacion] = field(default_factory=list)
