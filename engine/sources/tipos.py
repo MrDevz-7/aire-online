@@ -1,12 +1,10 @@
 """
 Forma intermedia común de los datos de cualquier fuente.
-
 Cada cliente (OpenAQ, AQICN, IBOCA, SIATA) habla con una API distinta y
 devuelve JSON distinto. Para que el resto del sistema no tenga que saber
 de esas diferencias, cada cliente TRADUCE su JSON a estas clases. La capa
 de ingestión solo conoce estas clases y la base de datos: nunca ve JSON
 de una API.
-
 Son dataclasses simples, sin lógica de negocio y sin dependencia de
 SQLAlchemy ni de httpx. Los valores y unidades se guardan TAL CUAL los
 reporta la fuente: la conversión entre fuentes es de M5.
@@ -35,12 +33,14 @@ class LecturaNormalizada:
 
 @dataclass(frozen=True)
 class PronosticoNormalizado:
-    """Un día pronosticado por una fuente para una estación.
+    """Un día pronosticado por una estación.
+    `fecha_objetivo` es el día calendario local (no un instante): el "día
+    que cubre" el pronóstico. `valor_promedio`, `min` y `max` pueden ser
+    None por separado según lo que publique la fuente; una fuente que solo
+    dé `avg` deja min/max en None, y no se inventan.
 
-    `fecha_objetivo` es el día calendario local de la fuente (no un
-    instante): el "día que cubre" el pronóstico. `valor_promedio`, `min`
-    y `max` pueden ser None por separado según lo que publique la fuente;
-    una fuente que solo dé `avg` deja min/max en None, y no se inventan.
+    Se conserva acá aunque AQICN dejó de aportar pronósticos (D58): el
+    cliente de Open-Meteo (M5c) la reutiliza tal cual.
     """
     contaminante: str
     fecha_objetivo: date
@@ -57,7 +57,6 @@ class EstacionNormalizada:
     latitud: float
     longitud: float
     lecturas: list[LecturaNormalizada] = field(default_factory=list)
-    pronosticos: list[PronosticoNormalizado] = field(default_factory=list)
     # False = la fuente no reporta datos recientes de esta estación: se
     # registra igual (mapa de cobertura), pero no se le piden lecturas.
     activa: bool = True
@@ -72,7 +71,6 @@ class FalloEstacion:
 @dataclass
 class ResultadoDescarga:
     """Lo que devuelve un cliente tras una descarga completa.
-
     Separa cuatro destinos posibles de cada estación: procesada
     (`estaciones`), fallida (`fallos`: se intentó y algo salió mal),
     descartada (`descartadas`: se decidió no usarla, por ejemplo por ser de

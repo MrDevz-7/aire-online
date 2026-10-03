@@ -1,10 +1,8 @@
 """
 Schemas Pydantic.
-
 Un "schema" Pydantic define la FORMA y VALIDACIÓN de los datos que entran
 o salen de la API. FastAPI los usa para validar el body (422 si falta algo)
 y para serializar la respuesta a JSON con un contrato fijo.
-
 Es distinto de los modelos SQLAlchemy (database/models.py): los modelos
 describen tablas; los schemas describen el JSON de entrada/salida. No
 siempre coinciden campo a campo.
@@ -34,11 +32,6 @@ class ResumenIngestionResponse(BaseModel):
     lecturas_insertadas: int
     lecturas_duplicadas: int
     lecturas_invalidas: int
-    pronosticos_guardados: int
-    pronosticos_actualizados: int
-    pronosticos_descartados: int
-    pronosticos_descartados_por_fecha: int
-    auditorias_pendientes_creadas: int
     estaciones_fallidas: list[EstacionFallidaResponse]
     estaciones_descartadas: dict[str, int]
     abortada: Optional[str] = None

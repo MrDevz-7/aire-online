@@ -1,6 +1,5 @@
 """
 Cliente de AQICN / WAQI (https://api.waqi.info).
-
 Igual que el de OpenAQ, este módulo SOLO habla con la API y traduce a las
 clases de `sources.tipos`; no conoce la base de datos.
 
@@ -13,31 +12,28 @@ Flujo de una descarga completa (`descargar()`):
      el país y la caja cae sobre países vecinos; se filtra por la marca
      "colombia" en el nombre (heurística: ver MARCA_PAIS).
   2. Por cada estación de Colombia con actividad reciente:
-     GET /feed/@{uid}/ -> `iaqi` (un valor por contaminante), el `aqi`
-     compuesto y, desde M5b, el `forecast` con los días futuros.
+     GET /feed/@{uid}/ -> `iaqi` (un valor por contaminante) y el `aqi`
+     compuesto.
 
 Lo que hay que entender de los VALORES: AQICN NO entrega concentraciones
 (µg/m³, ppm) sino ÍNDICES de calidad del aire (escala AQI, sin unidad) por
-contaminante. Se guardan tal cual, con unidad "AQI". El `forecast` sigue
-la misma escala: son valores AQI proyectados.
+contaminante. Se guardan tal cual, con unidad "AQI".
 
-Sobre el `forecast` (M5b): es una lista de días POR CONTAMINANTE. AQICN
-mezcla días ya pasados (los últimos 2-3, ya observados) con días futuros
-(los próximos 3-5, proyectados). Este cliente los traduce TODOS a
-`PronosticoNormalizado` sin filtrar por fecha: decidir "el pasado no es
-pronóstico" es una regla de negocio que aplica la capa de ingestión, no
-este traductor. El índice UV (`uvi`) SÍ se descarta acá, porque no es un
-contaminante del aire en este proyecto.
+Sobre el `forecast` (histórico M5b, retirado en M5c por D58): AQICN
+mezclaba en `feed.forecast.daily` días ya observados con días
+proyectados, pero solo cubría días PASADOS para Colombia (D57), así que
+no servía como fuente de pronóstico. M5c lo reemplazó por Open-Meteo
+(sources/open_meteo.py). Este cliente ya no lee ni parsea `forecast`.
 
 Seguridad: el token viaja en la URL (?token=...). Por eso este módulo
 silencia el log de httpx (que imprime cada URL) y NUNCA incluye URLs ni
 parámetros en sus mensajes de error.
 
 Prueba manual (desde engine/, con el venv activo):
-    python -m sources.aqicn crudo      # forma real de una respuesta (claves + forecast)
+    python -m sources.aqicn crudo      # forma real de una respuesta
     python -m sources.aqicn cobertura  # caja entera vs. descubrimiento por partes
-    python -m sources.aqicn          # muestra: hasta 5 estaciones activas
-    python -m sources.aqicn todas    # descarga completa + resumen
+    python -m sources.aqicn            # muestra: hasta 5 estaciones activas
+    python -m sources.aqicn todas      # descarga completa + resumen
 """
 from __future__ import annotations
 
@@ -45,7 +41,7 @@ import logging
 import sys
 import time
 from collections import Counter, deque
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -57,7 +53,6 @@ from sources.tipos import (
     EstacionNormalizada,
     FalloEstacion,
     LecturaNormalizada,
-    PronosticoNormalizado,
     ResultadoDescarga,
 )
 
@@ -66,11 +61,9 @@ logger = logging.getLogger(__name__)
 
 FUENTE = "aqicn"
 BASE_URL = "https://api.waqi.info"
-
 CONTAMINANTES_IAQI = ("pm25", "pm10", "o3", "no2", "so2", "co")
 UNIDAD = "AQI"
 MARCA_PAIS = "colombia"
-
 LADO_MIN_GRADOS = 0.5
 MAX_CAJAS = 400
 INTERVALO_MIN_S = 0.2
@@ -146,59 +139,6 @@ def _hora_de_medicion(t: Any) -> datetime | None:
     return None
 
 
-def _fecha_de_dia(valor: Any) -> date | None:
-    """'2026-09-30' -> date. None si no es una fecha ISO de día completo."""
-    if not isinstance(valor, str):
-        return None
-    try:
-        return date.fromisoformat(valor.strip())
-    except ValueError:
-        return None
-
-
-def _parsear_forecast(forecast: Any) -> list[PronosticoNormalizado]:
-    """forecast.daily -> lista de PronosticoNormalizado.
-
-    Recorre TODOS los items que traiga, sin filtrar por fecha: eso lo
-    decide la capa de ingestión, que conoce la fecha de captura. Descarta
-    acá lo que es estructuralmente distinto:
-      - Claves que no son contaminantes (el caso concreto: 'uvi').
-      - Items sin `day` parseable como fecha ISO.
-      - Items con avg/min/max todos nulos: no hay nada que guardar.
-    """
-    if not isinstance(forecast, dict):
-        return []
-    daily = forecast.get("daily")
-    if not isinstance(daily, dict):
-        return []
-
-    pronosticos: list[PronosticoNormalizado] = []
-    for contaminante, items in daily.items():
-        if contaminante not in CONTAMINANTES_IAQI:
-            continue
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            dia = _fecha_de_dia(item.get("day"))
-            if dia is None:
-                continue
-            promedio = _numero(item.get("avg"))
-            minimo = _numero(item.get("min"))
-            maximo = _numero(item.get("max"))
-            if promedio is None and minimo is None and maximo is None:
-                continue
-            pronosticos.append(PronosticoNormalizado(
-                contaminante=contaminante,
-                fecha_objetivo=dia,
-                valor_promedio=promedio,
-                valor_min=minimo,
-                valor_max=maximo,
-            ))
-    return pronosticos
-
-
 class ClienteAQICN:
     def __init__(
         self,
@@ -241,7 +181,6 @@ class ClienteAQICN:
 
     def _get(self, ruta: str, params: dict[str, Any] | None = None) -> Any:
         """GET que devuelve el campo `data` de una respuesta con status "ok".
-
         AQICN responde HTTP 200 incluso para los errores; la verdad está en
         el campo `status` del JSON. Ver política de reintentos y cortes en
         el cuerpo del método.
@@ -301,7 +240,6 @@ class ClienteAQICN:
 
     def _descubrir(self) -> list[dict[str, Any]]:
         """Estaciones de toda la caja de Colombia, consultando por partes.
-
         Búsqueda en anchura: pide la caja entera, y por cada caja que
         devuelve estaciones y aún es grande, pide sus 4 cuadrantes. Une por
         `uid`. Si falla la caja raíz, la excepción sube. Si falla una
@@ -367,21 +305,14 @@ class ClienteAQICN:
         hora = _a_utc(texto) if isinstance(texto, str) else None
         return hora is not None and ahora - hora > timedelta(days=VENTANA_ACTIVIDAD_DIAS)
 
-    def _leer_feed(
-        self, uid: str
-    ) -> tuple[list[LecturaNormalizada], datetime, list[PronosticoNormalizado]]:
-        """GET /feed/@{uid}/ -> (lecturas, hora de la medición, pronósticos).
-
-        Los pronósticos pueden venir vacíos (fuente sin forecast, o con
-        todos los items descartados por el parser); nunca es un error.
-        """
+    def _leer_feed(self, uid: str) -> tuple[list[LecturaNormalizada], datetime]:
+        """GET /feed/@{uid}/ -> (lecturas, hora de la medición)."""
         datos = self._get(f"/feed/@{uid}/")
         if not isinstance(datos, dict):
             raise AQICNError(f"feed de {uid} sin datos")
         medido_en = _hora_de_medicion(datos.get("time"))
         if medido_en is None:
             raise AQICNError(f"feed de {uid} sin hora de medición interpretable")
-
         lecturas: list[LecturaNormalizada] = []
         iaqi = datos.get("iaqi") or {}
         for contaminante in CONTAMINANTES_IAQI:
@@ -391,16 +322,12 @@ class ClienteAQICN:
         indice = _numero(datos.get("aqi"))
         if indice is not None:
             lecturas.append(LecturaNormalizada("aqi", indice, UNIDAD, medido_en))
-
-        pronosticos = _parsear_forecast(datos.get("forecast"))
-        return lecturas, medido_en, pronosticos
+        return lecturas, medido_en
 
     def descargar(self, limite: int | None = None) -> ResultadoDescarga:
-        """Descubre estaciones de Colombia y trae su estado actual más el forecast.
-
+        """Descubre estaciones de Colombia y trae su estado actual.
         `limite`: pedir `/feed` como máximo a N estaciones (pruebas
         manuales). Las inactivas y las descartadas no cuentan.
-
         Si falla el listado inicial la excepción sube (no hay nada que
         ingerir); si falla una estación, se registra y se sigue.
         """
@@ -436,7 +363,7 @@ class ClienteAQICN:
                 continue
             consultadas += 1
             try:
-                lecturas, medido_en, pronosticos = self._leer_feed(estacion.id_externo)
+                lecturas, medido_en = self._leer_feed(estacion.id_externo)
             except (AQICNAuthError, AQICNRateLimitError) as exc:
                 resultado.abortada = str(exc)
                 logger.error("Descarga abortada: %s", exc)
@@ -451,7 +378,6 @@ class ClienteAQICN:
                 resultado.sin_actividad_reciente += 1
             else:
                 estacion.lecturas = lecturas
-                estacion.pronosticos = pronosticos
             resultado.estaciones.append(estacion)
         logger.info(
             "AQICN: %d registradas (%d sin actividad reciente), %d fallidas, %d descartadas, %d requests.",
@@ -459,36 +385,6 @@ class ClienteAQICN:
             sum(resultado.descartadas.values()), self.n_requests,
         )
         return resultado
-
-
-def _imprimir_forecast(forecast: Any) -> None:
-    """Diagnóstico: forma real del `forecast` del feed, sin guardar nada.
-
-    Solo imprime la ESTRUCTURA (qué contaminantes, qué días, qué claves)
-    para poder ajustar el parser con datos reales. Exclusivo de la prueba
-    manual `python -m sources.aqicn crudo`.
-    """
-    if forecast is None:
-        print("   forecast: ausente")
-        return
-    if not isinstance(forecast, dict):
-        print(f"   forecast: tipo inesperado ({type(forecast).__name__})")
-        return
-    print(f"   forecast: claves raíz = {sorted(forecast)}")
-    daily = forecast.get("daily")
-    if not isinstance(daily, dict):
-        print(f"   forecast.daily: ausente o no es dict (tipo {type(daily).__name__})")
-        return
-    print(f"   forecast.daily: contaminantes = {sorted(daily)}")
-    for contaminante in sorted(daily):
-        items = daily[contaminante]
-        if not isinstance(items, list) or not items:
-            print(f"     - {contaminante}: sin items utilizables")
-            continue
-        primer = items[0]
-        claves = sorted(primer) if isinstance(primer, dict) else type(primer).__name__
-        fechas = [it.get("day") if isinstance(it, dict) else None for it in items]
-        print(f"     - {contaminante}: {len(items)} items | fechas = {fechas} | claves = {claves}")
 
 
 def _crudo() -> None:
@@ -511,7 +407,6 @@ def _crudo() -> None:
         print("   time:", datos.get("time"))
         print("   aqi:", repr(datos.get("aqi")), "| dominentpol:", datos.get("dominentpol"))
         print("   iaqi:", {k: (v or {}).get("v") for k, v in (datos.get("iaqi") or {}).items()})
-        _imprimir_forecast(datos.get("forecast"))
 
 
 def _cobertura() -> None:
@@ -571,17 +466,12 @@ def _probar() -> None:
             print(f"\n[{e.id_externo}] {e.nombre} ({e.latitud:.4f}, {e.longitud:.4f})")
             for lec in sorted(e.lecturas, key=lambda x: x.contaminante):
                 print(f"   {lec.contaminante:<5} {lec.valor:>8.1f} {lec.unidad:<4} {lec.medido_en.isoformat()}")
-            for pro in sorted(e.pronosticos, key=lambda x: (x.contaminante, x.fecha_objetivo)):
-                print(f"   PRO {pro.contaminante:<5} {str(pro.fecha_objetivo):<10} "
-                      f"avg={pro.valor_promedio} min={pro.valor_min} max={pro.valor_max}")
         return
     contaminantes: Counter = Counter(lec.contaminante for e in activas for lec in e.lecturas)
     print(f"\nLecturas por contaminante (solo estaciones activas): {dict(contaminantes)}")
-    n_pronosticos = sum(len(e.pronosticos) for e in activas)
-    print(f"Pronósticos parseados (solo estaciones activas): {n_pronosticos}")
     print("Estaciones activas:")
     for e in activas:
-        print(f"   [{e.id_externo}] {e.nombre} -> {len(e.lecturas)} lecturas, {len(e.pronosticos)} pronósticos")
+        print(f"   [{e.id_externo}] {e.nombre} -> {len(e.lecturas)} lecturas")
 
 
 if __name__ == "__main__":
