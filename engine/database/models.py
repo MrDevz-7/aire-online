@@ -3,8 +3,9 @@ Modelos SQLAlchemy 2.x (sintaxis declarativa con `Mapped` / `mapped_column`).
 Esquema de AirE_Online: una capa que reconcilia varias fuentes de calidad
 del aire que no comparten ID de estación (OpenAQ, AQICN/WAQI y, desde M4,
 dos redes regionales de monitoreo: IBOCA en Bogotá y SIATA en el Valle de
-Aburrá) y audita el pronóstico de AQICN contra la lectura real. Sin
-machine learning: todo es medición, comparación y aritmética.
+Aburrá) y audita los pronósticos de Open-Meteo contra las lecturas reales.
+Sin machine learning: todo es medición, comparación y aritmética.
+
 Convenciones (ver docs/MODELO_DATOS.md):
   - Tablas y columnas en español, snake_case, sin tildes; tablas en plural.
   - Enumeraciones = VARCHAR + CHECK (native_enum=False), nunca tipo ENUM
@@ -19,6 +20,7 @@ Convenciones (ver docs/MODELO_DATOS.md):
 """
 from datetime import date, datetime, timezone
 from typing import Any, Optional
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -35,12 +37,18 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
 def utcnow() -> datetime:
     """Timestamp en UTC. Se evita datetime.utcnow() (deprecado en Python
     3.12+, ambiguo sobre timezone) a favor de datetime.now(timezone.utc)."""
     return datetime.now(timezone.utc)
+
+
 class Base(DeclarativeBase):
     pass
+
+
 # --------------------------------------------------------------------------
 # Valores permitidos de las enumeraciones (fuente única de verdad).
 # --------------------------------------------------------------------------
@@ -50,9 +58,16 @@ class Base(DeclarativeBase):
 # (Valle de Aburrá). "sisaire" queda en el CHECK sin uso: sacarlo sería una
 # migración no aditiva (hay que probar que nada lo esté usando) para ganar
 # nada; agregar valores nuevos, en cambio, es barato (ver mini-clase CHECK
-# vs ENUM en el commit de este bloque). Quedan afuera de M4, para módulos
+# vs ENUM en el commit de ese bloque). Quedan afuera de M4, para módulos
 # futuros con el mismo patrón: "corantioquia" y "simac".
-FUENTES: tuple[str, ...] = ("openaq", "aqicn", "sisaire", "iboca", "siata")
+#
+# M5c: "open-meteo" se agrega para la captura de pronósticos (D58). No es
+# una fuente de ESTACIONES físicas (Open-Meteo es un modelo en grilla: no
+# tiene estaciones propias). Pero la tupla FUENTES es única y la comparten
+# los CHECKs de estaciones.fuente, pronosticos.fuente y
+# auditorias_pronostico.fuente_real, así que se agrega a todos por
+# consistencia. Migración aditiva: c3a4e2f5b8d1.
+FUENTES: tuple[str, ...] = ("openaq", "aqicn", "sisaire", "iboca", "siata", "open-meteo")
 # "pm1" (material particulado <1 micra, más fino que pm25) lo mide la red
 # IBOCA de Bogotá (M4). Sí es un contaminante del aire (a diferencia de un
 # índice compuesto como el UV, descartado en M3).
@@ -63,6 +78,8 @@ SEVERIDADES_ALERTA: tuple[str, ...] = ("baja", "media", "alta", "critica")
 ESTADOS_ALERTA: tuple[str, ...] = ("nueva", "en_revision", "notificada", "normalizada")
 # Estado en que una alerta deja de estar "abierta" (lo usa el índice parcial).
 ESTADO_ALERTA_CERRADA = "normalizada"
+
+
 def _enum(valores: tuple[str, ...], nombre_check: str) -> Enum:
     """Columna VARCHAR + CHECK con nombre. Se crea una instancia nueva por
     columna (no se comparte entre columnas)."""
@@ -73,6 +90,8 @@ def _enum(valores: tuple[str, ...], nombre_check: str) -> Enum:
         create_constraint=True,
         length=30,
     )
+
+
 class Estacion(Base):
     """Una estación física según UNA fuente. La misma estación real puede
     existir hasta tres veces (una por fuente); el vínculo entre ellas vive en
@@ -96,8 +115,11 @@ class Estacion(Base):
     primera_vez_vista: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ultima_vez_vista: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     metadatos: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+
     def __repr__(self) -> str:
         return f"<Estacion id={self.id} fuente={self.fuente!r} id_externo={self.id_externo!r}>"
+
+
 class Lectura(Base):
     """Una medición observada. Se guardan valor y unidad NATIVOS de la
     fuente: la conversión a una unidad común ocurre en M5, no acá."""
@@ -118,6 +140,8 @@ class Lectura(Base):
     unidad: Mapped[str] = mapped_column(String(20))
     medido_en: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     capturado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Emparejamiento(Base):
     """Vínculo entre dos estaciones de fuentes distintas que se consideran la
     misma zona. Cada par se guarda UNA sola vez, en orden canónico
@@ -137,6 +161,8 @@ class Emparejamiento(Base):
     distancia_km: Mapped[float] = mapped_column(Float)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
 class Comparacion(Base):
     """Resultado de comparar dos lecturas emparejadas en una ventana de
     tiempo. Almacén de resultados que llena M5."""
@@ -166,14 +192,28 @@ class Comparacion(Base):
     unidad_comun: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     diferencia_abs: Mapped[float] = mapped_column(Float)
     calculada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Pronostico(Base):
-    """Un valor pronosticado capturado de una fuente (hoy solo AQICN).
+    """Una fila por valor diario pronosticado, de una fuente.
+
+    Fuente actual (M5c): Open-Meteo Air Quality API (D58). El valor
+    pronosticado de un día D es el promedio simple de las 24 horas locales
+    de D (D61); si falta alguna hora, no se guarda la fila.
+
     Se guarda lo MÍNIMO necesario para auditar el pronóstico. La API pública
     expondrá métricas derivadas (error, sesgo por horizonte), no esta serie
-    cruda: decisión por los términos de uso de AQICN.
+    cruda.
+
     El horizonte (fecha_objetivo - fecha_captura) NO es una columna: es un
     dato derivado y se calcula al consultar. Guardarlo permitiría que las tres
-    fechas se contradigan entre sí."""
+    fechas se contradigan entre sí.
+
+    `unidad` (M5c, D65): agregada en la migración c3a4e2f5b8d1. Sin backfill:
+    las filas viejas de aqicn quedan en NULL, no se inventa un valor. Open-Meteo
+    siempre la setea al insertar. Se usa la misma convención de etiquetas que
+    `lecturas.unidad` (por ejemplo "µg/m³" para concentraciones, "AQI" para
+    índices)."""
     __tablename__ = "pronosticos"
     __table_args__ = (
         UniqueConstraint(
@@ -191,9 +231,13 @@ class Pronostico(Base):
     valor_promedio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     valor_min: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     valor_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # M5c: unidad del valor (NULL en filas viejas, sin backfill).
+    unidad: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     # Día (hora local de Colombia) en que se capturó el pronóstico.
     fecha_captura: Mapped[date] = mapped_column(Date)
     capturado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class AuditoriaPronostico(Base):
     """El veredicto sobre un pronóstico: qué pasó realmente y cuánto se
     equivocó. Una auditoría por pronóstico (UNIQUE)."""
@@ -231,6 +275,8 @@ class AuditoriaPronostico(Base):
     distancia_km_real: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     n_lecturas_real: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     resuelta_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class Alerta(Base):
     """Tarjeta del kanban. El mensaje se arma con una plantilla de texto, no
     con Gemini. Sin usuarios todavía: llegan en M8."""
