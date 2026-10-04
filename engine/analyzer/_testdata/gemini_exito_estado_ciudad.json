@@ -1,0 +1,39 @@
+{
+  "modelo": "gemini-3.8-flash",
+  "status": 200,
+  "latencia_s": 17.453,
+  "body": {
+    "candidates": [
+      {
+        "content": {
+          "parts": [
+            {
+              "text": "El reporte del estado de la calidad del aire para la ciudad de Bogotá, con fecha de referencia del 4 de octubre de 2026, registra mediciones para dos contaminantes. El material particulado PM2.5 presenta una concentración de 18.5 µg/m³, ubicándose en la categoría AQI «Moderada». Por su parte, el PM10 registra un valor de 42.0 µg/m³, clasificado en la categoría AQI «Buena».\n\nLa información se"
+            },
+            {
+              "text": " obtuvo a partir de 12 estaciones activas, con datos aportados por IBOCA, OpenAQ y AQICN. El registro más reciente corresponde a las 15:00:00Z en horario UTC, equivalente a las 10:00 del mismo día en hora local (-05). \n\nSe precisa que la cobertura real del sistema abarca Bogotá y el Valle de Aburrá, y que las cifras corresponden a estaciones puntuales y no representan un promedio del aire de toda la ciudad. Los datos cuentan con la atribución de OpenAQ (openaq.org), AQICN/WAQI (aqicn.org) y la Red de Monitoreo de Calidad de Aire de Bogotá (IBOCA).",
+              "thoughtSignature": "EmkKZwFpFH0TuhvaO/rpLK8MXDljSGG6d4l4SNSIe2OXfPjQOfiS/l/G6HgJR9xDu8rEW+XFbERtCH1VlGXnMwluzeMHnOWwl7+h0OM2vaKpkKaTBHicMe/FgSA17+M44/pRxldz6TD/Zcw="
+            }
+          ],
+          "role": "model"
+        },
+        "finishReason": "STOP",
+        "index": 0
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 565,
+      "candidatesTokenCount": 265,
+      "totalTokenCount": 830,
+      "promptTokensDetails": [
+        {
+          "modality": "TEXT",
+          "tokenCount": 565
+        }
+      ],
+      "serviceTier": "standard"
+    },
+    "modelVersion": "gemini-3.8-flash",
+    "responseId": "ayDCavXnJMCtqtsP46aT6AM"
+  }
+}
