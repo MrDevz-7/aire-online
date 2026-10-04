@@ -1,6 +1,5 @@
 """
 Configuración central de la aplicación.
-
 Usamos pydantic-settings para leer variables de entorno de forma tipada.
 Esto evita el patrón `os.getenv("ALGO")` regado por todo el código: acá
 declaramos UNA vez qué variables existen, de qué tipo son, y si tienen
@@ -27,8 +26,51 @@ class Settings(BaseSettings):
     # por el cliente al crearse.
     AQICN_TOKEN: str = ""
 
+    # ----------------------------------------------------------------------
+    # Gemini (M6). Ver docs/CONCEPTOS.md, sección "Uso de Gemini y privacidad".
+    # ----------------------------------------------------------------------
+    # Claves de Google AI Studio (formato "AQ.<...>"), separadas por coma si
+    # hay varias. El código las rota: si una falla con 401/403 o agota su
+    # cuota, se pasa a la siguiente. Sin claves configuradas, el sistema
+    # sigue funcionando con la plantilla determinística (motivo_fallback=
+    # 'sin_clave') — Gemini es opcional, no un requisito.
     GEMINI_API_KEYS: str = ""
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    # Modelo por defecto. Verificado en el Bloque 2 de M6 con la clave real:
+    # gemini-3.8-flash responde bien y está en el nivel gratuito (serviceTier
+    # "standard" en la respuesta). Si el modelo no está disponible para una
+    # clave en particular, el cliente de M6 prueba los demás de la lista de
+    # D71 en orden (3.8-flash -> 3.7-flash -> 3.6-flash -> ... -> 3.5-flash-lite).
+    GEMINI_MODEL: str = "gemini-3.8-flash"
+    # Tope diario de intentos de IA (por día local Colombia). Se cuentan tanto
+    # las llamadas exitosas como las que fallaron (429, timeout, validación):
+    # un intento fallido también consume tiempo y puede haber consumido cuota
+    # del lado de Google. Si se alcanza el tope, se usa la plantilla sin
+    # llamar a Gemini. Default conservador (10) porque Google ya no publica
+    # la cuota diaria del nivel gratuito: mejor quedarse corto que romper
+    # la experiencia a mitad del día.
+    GEMINI_MAX_LLAMADAS_DIA: int = 10
+    # Timeout HTTP para una llamada a Gemini, en segundos. En el Bloque 2 se
+    # midió una latencia típica de ~7-12s con una ficha realista; 60s da
+    # margen para fichas más grandes sin colgar la request del endpoint.
+    GEMINI_TIMEOUT_S: int = 60
+
+    # ----------------------------------------------------------------------
+    # Reportes (M6).
+    # ----------------------------------------------------------------------
+    # Mínimo de días objetivo DISTINTOS con auditorías calculadas para
+    # publicar el promedio de error de un contaminante y horizonte (D70). Se
+    # cuentan días, no filas: dos estaciones que comparten celda de la grilla
+    # comparten pronóstico y no son muestras independientes (D72). Con menos
+    # días, la ficha dice "todavía no hay suficientes días auditados" y no
+    # se publica ninguna cifra de error.
+    MIN_DIAS_AUDITADOS_PARA_PROMEDIO: int = 3
+    # Largo máximo del texto narrativo. Sirve tanto para el validador de la
+    # respuesta de Gemini como para el saneo del texto de la plantilla. Un
+    # valor alto evita truncar de más, pero acota el daño si un modelo
+    # alucina una respuesta larguísima.
+    REPORTE_MAX_CARACTERES_TEXTO: int = 4000
+
+    # development | production
     ENVIRONMENT: str = "development"
 
 
