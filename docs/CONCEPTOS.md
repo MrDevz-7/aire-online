@@ -85,3 +85,45 @@ Redacción sugerida, basada en la página de licencia oficial de Open-Meteo (htt
 > Datos de calidad del aire: Copernicus Atmosphere Monitoring Service (CAMS), expuestos vía Open-Meteo Air Quality API (open-meteo.com). Uso no comercial.
 
 Si Open-Meteo cambia su licencia o el texto exacto de atribución, la referencia debe actualizarse. La licencia completa está en https://open-meteo.com/en/licence — se recomienda incluir el enlace en cualquier interfaz pública del proyecto que muestre datos de Open-Meteo.
+
+
+## Atribuciones de fuentes de datos (M6 Bloque 4.4)
+
+Investigación con tope de 1 página oficial por fuente (D47/regla j), hecha el 2026-10-04. Cuando no se pudo confirmar la licencia se marca como tal: no se inventa ni la licencia ni la redacción.
+
+### OpenAQ
+- URL: https://docs.openaq.org/about/terms y https://docs.openaq.org/resources/licenses (2026-10-04).
+- Atribución sugerida: "Datos de OpenAQ (openaq.org), agregador de datos abiertos de calidad del aire."
+- Términos: **CONFIRMADO**. La API de licencias expone por fuente los campos `commercialUseAllowed`, `attributionRequired`, `shareAlikeRequired`, `modificationAllowed`, `redistributionAllowed`. Ejemplo documentado: CC BY 4.0. Uso no comercial permitido; redistribución permitida; modificación/derivados permitidos; atribución **obligatoria**.
+
+### AQICN / WAQI
+- URL: https://aqicn.org/ (2026-10-04; /terms/ devuelve 404, /api/ no expone la licencia).
+- Atribución sugerida: "Datos de AQICN / World Air Quality Index Project (aqicn.org)."
+- Términos: **NO CONFIRMADO** por investigación directa. Se identificaron términos del *data platform* (producto histórico/pago) que sugieren restricciones más amplias que "no comercial" (no cachear/archivar, no publicar rankings ni comparaciones, avisar "datos no validados" en derivados), pero **no se pudo confirmar si aplican a la API en tiempo real** (`api.waqi.info`), que es lo que el proyecto usa. La home acredita a CAMS, MaxMind, GeoNames y OpenStreetMap como componentes del sitio. La persona aportó información adicional (sin URL de fuente): "API básica libre para uso no comercial, educativo y de desarrollo". ⚠ Hallazgo para el PM (ver abajo).
+
+### IBOCA (Red de Monitoreo de Calidad del Aire de Bogotá)
+- URL: https://oab.ambientebogota.gov.co/terminos-y-condiciones-de-uso/ (2026-10-04, enlazada desde el footer del Observatorio Ambiental de Bogotá).
+- Atribución sugerida: "Red de Monitoreo de Calidad del Aire de Bogotá (IBOCA), Secretaría Distrital de Ambiente."
+- Términos: **PARCIALMENTE CONFIRMADO**. La sección 6 (Derechos de autor) del OAB dice textualmente: *"No se ejercerán derechos de autor sobre información de carácter público o que tenga como fin la divulgación de indicadores, documentos, eventos, actividades o acciones de la Secretaría Distrital de Ambiente sus dependencias y entidades adscritas o vinculadas, a menos que se especifique lo contrario."* IBOCA opera bajo la Secretaría Distrital de Ambiente, así que sus indicadores entran en ese "no se ejercerán derechos de autor". No es una licencia abierta formal (CC BY, ODbL), pero es una declaración permisiva alineada con la Ley 1712 de 2014 (transparencia y acceso a la información pública en Colombia).
+
+### SIATA (Sistema de Alerta Temprana del Valle de Aburrá)
+- URL: https://siata.gov.co/ y https://datosabiertos.metropol.gov.co/ (2026-10-04).
+- Atribución sugerida: "SIATA — Sistema de Alerta Temprana del Valle de Aburrá, Área Metropolitana del Valle de Aburrá."
+- Términos: **NO CONFIRMADO**. El sitio `siata.gov.co` es una SPA y el HTML servido no incluye los términos. El portal de datos abiertos del AMVA (`datosabiertos.metropol.gov.co`) devolvió **502 Bad Gateway** (Azure Application Gateway) durante toda la investigación. La persona aportó información adicional (sin URL de fuente): "datos abiertos bajo Ley 1712, uso no comercial con crédito". ⚠ Hallazgo para el PM (ver abajo).
+
+### Open-Meteo / CAMS
+- Ver la sección "Atribución requerida" más arriba (cierre de M5c).
+- Atribución: "Copernicus Atmosphere Monitoring Service (CAMS), vía Open-Meteo Air Quality API (open-meteo.com). Uso no comercial."
+- Términos: **CONFIRMADO**. Open-Meteo exige atribución a CAMS y menciona uso no comercial en su página de licencia.
+
+### ⚠ Hallazgos pendientes de decisión del PM
+
+Tres hallazgos que **no se resuelven en este módulo** (reglas g y j del prompt):
+
+1. **AQICN / WAQI**: los términos del *data platform* sugieren restricciones más amplias que "no comercial" (no cachear/archivar, no publicar rankings o comparaciones, avisar "no validado" en todo derivado). No se pudo confirmar si esos términos cubren la API en tiempo real que usa el proyecto. Si el PM decide acotar o suspender la ingestión de AQICN hasta aclarar, ese cambio es de M5 (qué fuentes se ingieren), no de M6.
+
+2. **SIATA**: el portal de datos abiertos del AMVA devolvió 502 durante toda la investigación. Sin licencia pública verificada.
+
+3. **Información adicional aportada por la persona**: se registró que AQICN sería libre para uso no comercial/educativo y que SIATA estaría bajo Ley 1712 con uso no comercial y crédito. Esta información **no se verificó contra una URL oficial en esta sesión**: se documenta como contexto, no como confirmación.
+
+Ninguno de los tres hallazgos bloquea M6: las fichas de reporte incluyen las atribuciones de las fuentes que aportan datos, lo cual es correcto independientemente de la licencia. La decisión de qué ingerir es del PM.

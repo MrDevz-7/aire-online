@@ -1,11 +1,9 @@
 """
 Fichas determinísticas y plantillas de reporte (M6).
-
 Una "ficha" es un dict con cifras, fuentes, fecha, cobertura, limitaciones
 y atribuciones, construido con código normal. Es lo único que se le pasa a
 Gemini para narrar, o a la plantilla como fallback. Gemini nunca calcula
 (D2, D70).
-
 Dos tipos de ficha: `estado_ciudad` (estado actual por ciudad) y
 `auditoria_pronostico` (resumen del mes en curso de la auditoría del
 pronóstico de Open-Meteo).
@@ -164,7 +162,6 @@ def construir_ficha_estado_ciudad(
     `global` para todas las detectadas)."""
     ahora = ahora or datetime.now(timezone.utc)
     fecha_ref = _fecha_local(ahora)
-
     filas = _lecturas_recientes(db, ahora)
     por_ciudad = _agrupar_por_ciudad(filas)
     if alcance != CIUDAD_GLOBAL:
@@ -203,7 +200,6 @@ def construir_ficha_estado_ciudad(
     atribuciones = sorted(
         _ATRIBUCIONES[f] for f in fuentes_totales if f in _ATRIBUCIONES
     )
-
     return {
         "tipo": "estado_ciudad",
         "alcance": alcance,
@@ -296,6 +292,7 @@ def _errores_por_contaminante_y_horizonte(
         bucket["errores"].append(fila.error_abs)
         if fila.sesgo is not None:
             bucket["sesgos"].append(fila.sesgo)
+
     resultado: list[dict[str, Any]] = []
     for (cont, horiz), bucket in sorted(grupos.items()):
         dias = len(bucket["dias"])
@@ -332,7 +329,6 @@ def construir_ficha_auditoria_pronostico(
     errores = _errores_por_contaminante_y_horizonte(
         db, min_dias=settings.MIN_DIAS_AUDITADOS_PARA_PROMEDIO
     )
-
     return {
         "tipo": "auditoria_pronostico",
         "alcance": alcance,
@@ -348,7 +344,10 @@ def construir_ficha_auditoria_pronostico(
             f"Horizonte medido en este proyecto: {horizonte_max} días.",
             "o3, no2, so2 y co se capturan pero no se auditan (requieren conversión de unidades que el proyecto no hace).",
         ],
-        "atribuciones": [_ATRIBUCIONES["open-meteo"]],
+        # La ficha mezcla DOS fuentes: el pronóstico (Open-Meteo/CAMS) y la
+        # verdad de terreno contra la que se compara (AQICN, hardcodeada en
+        # services/auditoria.py al resolver cada fila). Se atribuyen ambas.
+        "atribuciones": [_ATRIBUCIONES["open-meteo"], _ATRIBUCIONES["aqicn"]],
     }
 
 

@@ -1,18 +1,15 @@
 """
 Tests de services/reportes.py (M6).
-
 Estrategia:
   - Hash canónico y plantillas: unitarios puros, sin base ni red.
   - Fichas (agrupación y conteos): unitarios con `mock.patch`, porque la
     ficha AGREGA todos los datos de una ciudad y aislar solo los del test
     no es posible sin tocar la función. La integración real (que el SQL
     traiga los datos correctos) se valida en la corrida del Bloque 6.
-
 Nota para M13 (módulo de tests del proyecto): revisar esta decisión de
 mock vs. BD real. Si M13 adopta un patrón distinto (BD real con prefijo
 TEST_M6_REP_, o migración a pytest + carpeta tests/), migrar este archivo
 a ese patrón.
-
 Se corren con:
     cd engine
     python -m unittest services.test_reportes -v
@@ -149,6 +146,7 @@ def _ficha_auditoria_ejemplo(**overrides) -> dict:
         "atribuciones": [
             "Copernicus Atmosphere Monitoring Service (CAMS), "
             "vía Open-Meteo Air Quality API",
+            "AQICN/WAQI (aqicn.org)",
         ],
     }
     ficha.update(overrides)
@@ -356,6 +354,16 @@ class TestFichaAuditoria(unittest.TestCase):
         item = ficha["errores_por_contaminante_y_horizonte"][0]
         self.assertTrue(item["muestra_suficiente"])
         self.assertEqual(item["error_abs_promedio"], 12.34)
+
+    def test_atribuciones_incluyen_fuente_real(self) -> None:
+        """La ficha debe atribuir tanto a Open-Meteo (fuente del pronóstico)
+        como a AQICN (fuente de las lecturas reales contra las que se compara,
+        hardcodeada en services/auditoria.py)."""
+        ficha = self._ficha()
+        atribuciones_texto = " ".join(ficha["atribuciones"])
+        self.assertIn("Copernicus Atmosphere Monitoring Service (CAMS)", atribuciones_texto)
+        self.assertIn("AQICN", atribuciones_texto)
+        self.assertEqual(len(ficha["atribuciones"]), 2)
 
 
 if __name__ == "__main__":
