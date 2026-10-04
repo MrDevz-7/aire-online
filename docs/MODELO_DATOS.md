@@ -101,3 +101,16 @@ erDiagram
         timestamptz actualizada_en
         timestamptz resuelta_en
     }
+    reportes {
+        int id PK
+        string tipo
+        string alcance
+        date fecha_referencia
+        timestamptz generado_en
+        jsonb datos_entrada
+        string hash_datos
+        text texto
+        string origen_texto
+        string modelo
+        string motivo_fallback
+    }
