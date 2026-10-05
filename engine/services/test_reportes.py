@@ -6,6 +6,10 @@ Estrategia:
     ficha AGREGA todos los datos de una ciudad y aislar solo los del test
     no es posible sin tocar la función. La integración real (que el SQL
     traiga los datos correctos) se valida en la corrida del Bloque 6.
+  - Orquestador: BD real (mismo patrón que test_auditoria.py) con un
+    prefijo `TEST_M6_REP_` en `alcance`. `setUp`/`tearDown` borran todo
+    lo que tenga ese prefijo. El cliente Gemini se inyecta con un doble
+    simple; no se toca la red.
 Nota para M13 (módulo de tests del proyecto): revisar esta decisión de
 mock vs. BD real. Si M13 adopta un patrón distinto (BD real con prefijo
 TEST_M6_REP_, o migración a pytest + carpeta tests/), migrar este archivo
@@ -20,10 +24,16 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
+from sqlalchemy import delete
+from analyzer.gemini_client import ResultadoGemini
+from database.models import Reporte
+from database.session import SessionLocal
 from services.reportes import (
     CIUDAD_GLOBAL,
     construir_ficha_auditoria_pronostico,
     construir_ficha_estado_ciudad,
+    generar_reporte,
+    generar_reportes,
     hash_canonico,
     plantilla_auditoria_pronostico,
     plantilla_estado_ciudad,
@@ -333,5 +343,196 @@ class TestFichaAuditoria(unittest.TestCase):
         self.assertIn("Copernicus Atmosphere Monitoring Service (CAMS)", atribuciones_texto)
         self.assertIn("World Air Quality Index Project", atribuciones_texto)
         self.assertEqual(len(ficha["atribuciones"]), 2)
+# ---------------------------------------------------------------------------
+# Orquestador (BD real con prefijo TEST_M6_REP_, cliente Gemini doble)
+# ---------------------------------------------------------------------------
+PREFIJO_ALCANCE = "TEST_M6_REP_"
+_FICHA_FIJA = {
+    "tipo": "estado_ciudad",
+    "alcance": "TEST_M6_REP_1",
+    "fecha_referencia": "2026-10-04",
+    "ciudades": [],
+    "limitaciones": ["limitación de prueba"],
+    "atribuciones": [],
+}
+def _limpiar_reportes(db) -> None:
+    db.execute(delete(Reporte).where(Reporte.alcance.like(f"{PREFIJO_ALCANCE}%")))
+    db.commit()
+class _ClienteFalso:
+    """Doble de `ClienteGemini` para tests. No toca red: devuelve el
+    `ResultadoGemini` que se le indique y cuenta las veces que se llamó."""
+    def __init__(self, resultado: ResultadoGemini) -> None:
+        self._resultado = resultado
+        self.n_llamadas = 0
+    def generar(self, *args, **kwargs) -> ResultadoGemini:  # noqa: ANN002, ANN003
+        self.n_llamadas += 1
+        return self._resultado
+    def close(self) -> None:  # por si algún test lo cierra
+        pass
+class TestOrquestador(unittest.TestCase):
+    """Usa BD real y un cliente Gemini inyectado. `alcance` con prefijo
+    TEST_M6_REP_ para limpiar sin tocar filas reales."""
+    def setUp(self) -> None:
+        self.db = SessionLocal()
+        _limpiar_reportes(self.db)
+    def tearDown(self) -> None:
+        _limpiar_reportes(self.db)
+        self.db.close()
+    def _alcance(self) -> str:
+        return f"{PREFIJO_ALCANCE}1"
+    def _patch_ficha(self):
+        """Context manager que fuerza a `_ficha_y_plantilla` a devolver una
+        ficha fija. Se usa `patch` sobre la función que la construye."""
+        return patch(
+            "services.reportes.construir_ficha_estado_ciudad",
+            return_value=dict(_FICHA_FIJA, alcance=self._alcance()),
+        )
+    def test_exito_gemini_persiste_con_origen_y_llamadas(self) -> None:
+        resultado = ResultadoGemini(
+            texto="Reporte de prueba sin cifras.",
+            modelo="modelo-test",
+            llamadas_gastadas=1,
+            motivo_fallo=None,
+        )
+        cliente = _ClienteFalso(resultado)
+        with self._patch_ficha():
+            r = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertTrue(r.nuevo)
+        self.assertEqual(r.origen_texto, "gemini")
+        self.assertEqual(r.modelo, "modelo-test")
+        self.assertEqual(r.llamadas_ia, 1)
+        self.assertIsNone(r.motivo_fallback)
+        self.assertEqual(r.texto, "Reporte de prueba sin cifras.")
+        self.assertEqual(cliente.n_llamadas, 1)
+    def test_idempotencia_no_llama_segunda_vez(self) -> None:
+        resultado = ResultadoGemini(
+            texto="Reporte de prueba.", modelo="modelo-test",
+            llamadas_gastadas=1, motivo_fallo=None,
+        )
+        cliente = _ClienteFalso(resultado)
+        with self._patch_ficha():
+            r1 = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+            r2 = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertTrue(r1.nuevo)
+        self.assertFalse(r2.nuevo)  # reutilizado
+        self.assertEqual(cliente.n_llamadas, 1)  # segunda vez: cacheado
+        self.assertEqual(r1.hash_datos, r2.hash_datos)
+    def test_forzar_plantilla_no_llama_y_usa_motivo_forzado(self) -> None:
+        resultado = ResultadoGemini(
+            texto="texto que no debería usarse", modelo="m",
+            llamadas_gastadas=1, motivo_fallo=None,
+        )
+        cliente = _ClienteFalso(resultado)
+        with self._patch_ficha():
+            r = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                forzar_plantilla=True, ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertEqual(r.origen_texto, "plantilla")
+        self.assertEqual(r.motivo_fallback, "forzado")
+        self.assertEqual(r.llamadas_ia, 0)
+        self.assertEqual(cliente.n_llamadas, 0)
+    def test_sin_clave_usa_plantilla(self) -> None:
+        resultado = ResultadoGemini(
+            texto="no debería usarse", modelo="m",
+            llamadas_gastadas=1, motivo_fallo=None,
+        )
+        cliente = _ClienteFalso(resultado)
+        with self._patch_ficha(), \
+             patch("services.reportes.settings.GEMINI_API_KEYS", ""):
+            r = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertEqual(r.origen_texto, "plantilla")
+        self.assertEqual(r.motivo_fallback, "sin_clave")
+        self.assertEqual(r.llamadas_ia, 0)
+        self.assertEqual(cliente.n_llamadas, 0)
+    def test_cuota_agotada_usa_plantilla_sin_llamar(self) -> None:
+        resultado = ResultadoGemini(
+            texto="no debería usarse", modelo="m",
+            llamadas_gastadas=1, motivo_fallo=None,
+        )
+        cliente = _ClienteFalso(resultado)
+        with self._patch_ficha(), \
+             patch("services.reportes._llamadas_hoy", return_value=10_000):
+            r = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertEqual(r.origen_texto, "plantilla")
+        self.assertEqual(r.motivo_fallback, "cuota_diaria")
+        self.assertEqual(r.llamadas_ia, 0)
+        self.assertEqual(cliente.n_llamadas, 0)
+    def test_validacion_numeros_cae_a_plantilla(self) -> None:
+        # Texto con un número que no está en la ficha.
+        resultado = ResultadoGemini(
+            texto="El valor fue 999.", modelo="m",
+            llamadas_gastadas=1, motivo_fallo=None,
+        )
+        cliente = _ClienteFalso(resultado)
+        with self._patch_ficha():
+            r = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertEqual(r.origen_texto, "plantilla")
+        self.assertEqual(r.motivo_fallback, "validacion_numeros")
+        self.assertEqual(r.llamadas_ia, 1)  # la llamada se gastó igual
+    def test_validacion_texto_cae_a_plantilla(self) -> None:
+        resultado = ResultadoGemini(
+            texto="El sistema usa machine learning.", modelo="m",
+            llamadas_gastadas=1, motivo_fallo=None,
+        )
+        cliente = _ClienteFalso(resultado)
+        with self._patch_ficha():
+            r = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertEqual(r.origen_texto, "plantilla")
+        self.assertEqual(r.motivo_fallback, "validacion_texto")
+        self.assertEqual(r.llamadas_ia, 1)
+    def test_falla_del_cliente_usa_su_motivo_y_llamadas(self) -> None:
+        resultado = ResultadoGemini(
+            texto=None, modelo=None,
+            llamadas_gastadas=2, motivo_fallo="http_429",
+        )
+        cliente = _ClienteFalso(resultado)
+        with self._patch_ficha():
+            r = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertEqual(r.origen_texto, "plantilla")
+        self.assertEqual(r.motivo_fallback, "http_429")
+        self.assertEqual(r.llamadas_ia, 2)
+    def test_generar_reportes_itera_tipos_y_alcances(self) -> None:
+        resultado = ResultadoGemini(
+            texto="Reporte.", modelo="m", llamadas_gastadas=1, motivo_fallo=None,
+        )
+        cliente = _ClienteFalso(resultado)
+        with patch(
+            "services.reportes.construir_ficha_estado_ciudad",
+            return_value=dict(_FICHA_FIJA, alcance=f"{PREFIJO_ALCANCE}1"),
+        ):
+            resumen = generar_reportes(
+                self.db, tipo="estado_ciudad",
+                alcance=f"{PREFIJO_ALCANCE}1",
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+        self.assertEqual(resumen.totales, 1)
+        self.assertEqual(resumen.nuevos, 1)
+        self.assertEqual(resumen.reutilizados, 0)
+        self.assertEqual(resumen.por_origen.get("gemini"), 1)
 if __name__ == "__main__":
     unittest.main()

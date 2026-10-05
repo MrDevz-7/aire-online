@@ -7,19 +7,34 @@ Gemini para narrar, o a la plantilla como fallback. Gemini nunca calcula
 Dos tipos de ficha: `estado_ciudad` (estado actual por ciudad) y
 `auditoria_pronostico` (resumen del mes en curso de la auditoría del
 pronóstico de Open-Meteo).
+Este módulo también contiene el orquestador `generar_reporte` (Bloque 5
+sub-pieza 4): construye la ficha, decide si llamar a Gemini o usar la
+plantilla, valida el texto, y persiste todo en `reportes`.
 """
 from __future__ import annotations
 import hashlib
 import json
+import logging
 import statistics
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from analyzer.gemini_client import INSTRUCCION_SISTEMA, ClienteGemini
+from analyzer.validador_texto import validar
 from database.config import settings
-from database.models import AuditoriaPronostico, Estacion, Lectura, Pronostico
+from database.models import (
+    AuditoriaPronostico,
+    Estacion,
+    Lectura,
+    Pronostico,
+    Reporte,
+    utcnow,
+)
 from services.aqi_escala import categoria_aqi, convertir_a_aqi
 from sources.tipos import VENTANA_ACTIVIDAD_DIAS
+logger = logging.getLogger(__name__)
 OFFSET_COLOMBIA = timezone(timedelta(hours=-5))
 CIUDAD_GLOBAL = "global"
 # Fuentes regionales de una sola ciudad/zona.
@@ -396,3 +411,280 @@ def plantilla_auditoria_pronostico(ficha: dict[str, Any]) -> str:
     if ficha.get("atribuciones"):
         parrafos.append("Fuentes: " + " ".join(ficha["atribuciones"]) + ".")
     return "\n\n".join(parrafos)
+# ---------------------------------------------------------------------------
+# Orquestador (Bloque 5 sub-pieza 4)
+# ---------------------------------------------------------------------------
+@dataclass
+class ResumenReporte:
+    """Resultado de generar (o reutilizar) UN reporte."""
+    tipo: str
+    alcance: str
+    fecha_referencia: date
+    hash_datos: str
+    nuevo: bool  # True si se acaba de persistir; False si se reutilizó
+    origen_texto: str  # "gemini" | "plantilla"
+    motivo_fallback: Optional[str]
+    modelo: Optional[str]
+    llamadas_ia: int
+    texto: str
+    def a_dict(self) -> dict[str, Any]:
+        return {
+            "tipo": self.tipo,
+            "alcance": self.alcance,
+            "fecha_referencia": self.fecha_referencia.isoformat(),
+            "nuevo": self.nuevo,
+            "origen_texto": self.origen_texto,
+            "motivo_fallback": self.motivo_fallback,
+            "modelo": self.modelo,
+            "llamadas_ia": self.llamadas_ia,
+        }
+def _resumen_de(r: Reporte, *, nuevo: bool) -> ResumenReporte:
+    return ResumenReporte(
+        tipo=r.tipo,
+        alcance=r.alcance,
+        fecha_referencia=r.fecha_referencia,
+        hash_datos=r.hash_datos,
+        nuevo=nuevo,
+        origen_texto=r.origen_texto,
+        motivo_fallback=r.motivo_fallback,
+        modelo=r.modelo,
+        llamadas_ia=r.llamadas_ia or 0,
+        texto=r.texto,
+    )
+def _llamadas_hoy(db: Session, ahora: datetime) -> int:
+    """Solicitudes HTTP a Gemini ya gastadas en el día local (D73). Se
+    suman los `llamadas_ia` de los reportes con la misma `fecha_referencia`
+    que hoy local; filas viejas (NULL) cuentan como 0."""
+    hoy = _fecha_local(ahora)
+    suma = db.execute(
+        select(func.coalesce(func.sum(Reporte.llamadas_ia), 0))
+        .where(Reporte.fecha_referencia == hoy)
+    ).scalar()
+    return int(suma or 0)
+def _buscar_reporte(
+    db: Session, tipo: str, alcance: str, fecha_referencia: date, hash_datos: str
+) -> Optional[Reporte]:
+    return db.execute(
+        select(Reporte).where(
+            Reporte.tipo == tipo,
+            Reporte.alcance == alcance,
+            Reporte.fecha_referencia == fecha_referencia,
+            Reporte.hash_datos == hash_datos,
+        )
+    ).scalar_one_or_none()
+def _persistir(
+    db: Session,
+    *,
+    tipo: str,
+    alcance: str,
+    fecha_referencia: date,
+    ficha: dict[str, Any],
+    hash_datos: str,
+    texto: str,
+    origen_texto: str,
+    modelo: Optional[str],
+    motivo_fallback: Optional[str],
+    llamadas_ia: int,
+    ahora: datetime,
+) -> Reporte:
+    r = Reporte(
+        tipo=tipo,
+        alcance=alcance,
+        fecha_referencia=fecha_referencia,
+        generado_en=ahora,
+        datos_entrada=ficha,
+        hash_datos=hash_datos,
+        texto=texto,
+        origen_texto=origen_texto,
+        modelo=modelo,
+        motivo_fallback=motivo_fallback,
+        llamadas_ia=llamadas_ia,
+    )
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+    return r
+def _ficha_y_plantilla(
+    db: Session, tipo: str, alcance: str, ahora: datetime
+) -> tuple[dict[str, Any], str]:
+    if tipo == "estado_ciudad":
+        ficha = construir_ficha_estado_ciudad(db, alcance, ahora=ahora)
+        return ficha, plantilla_estado_ciudad(ficha)
+    if tipo == "auditoria_pronostico":
+        ficha = construir_ficha_auditoria_pronostico(db, alcance=alcance, ahora=ahora)
+        return ficha, plantilla_auditoria_pronostico(ficha)
+    raise ValueError(
+        f"tipo de reporte desconocido: {tipo!r} (válidos: estado_ciudad, auditoria_pronostico)"
+    )
+def generar_reporte(
+    db: Session,
+    tipo: str,
+    alcance: str,
+    *,
+    forzar_plantilla: bool = False,
+    ahora: Optional[datetime] = None,
+    cliente: Optional[ClienteGemini] = None,
+) -> ResumenReporte:
+    """Genera (o reutiliza) UN reporte del `tipo` y `alcance` indicados.
+    Devuelve un `ResumenReporte` con lo que pasó. No lanza por errores de
+    Gemini ni por validación: siempre cae a la plantilla.
+    - `forzar_plantilla=True` hace upsert con la plantilla y
+      `motivo_fallback='forzado'`, sin llamar a Gemini.
+    - `cliente` inyectable para tests; en uso normal se deja en None y el
+      orquestador abre y cierra un `ClienteGemini`.
+    """
+    ahora = ahora or utcnow()
+    fecha_referencia = _fecha_local(ahora)
+    ficha, plantilla = _ficha_y_plantilla(db, tipo, alcance, ahora)
+    hash_datos = hash_canonico(ficha)
+    # 1. Forzado por parámetro: upsert de plantilla, sin tocar la cuota.
+    if forzar_plantilla:
+        existente = _buscar_reporte(db, tipo, alcance, fecha_referencia, hash_datos)
+        if existente is not None:
+            existente.texto = plantilla
+            existente.origen_texto = "plantilla"
+            existente.motivo_fallback = "forzado"
+            existente.modelo = None
+            existente.llamadas_ia = 0
+            db.commit()
+            db.refresh(existente)
+            return _resumen_de(existente, nuevo=False)
+        r = _persistir(
+            db, tipo=tipo, alcance=alcance, fecha_referencia=fecha_referencia,
+            ficha=ficha, hash_datos=hash_datos, texto=plantilla,
+            origen_texto="plantilla", modelo=None, motivo_fallback="forzado",
+            llamadas_ia=0, ahora=ahora,
+        )
+        return _resumen_de(r, nuevo=True)
+    # 2. Caché: mismo hash → reutilizar sin llamar a Gemini.
+    existente = _buscar_reporte(db, tipo, alcance, fecha_referencia, hash_datos)
+    if existente is not None:
+        return _resumen_de(existente, nuevo=False)
+    # 3. Sin claves configuradas: plantilla, sin llamar.
+    if not settings.GEMINI_API_KEYS.strip():
+        r = _persistir(
+            db, tipo=tipo, alcance=alcance, fecha_referencia=fecha_referencia,
+            ficha=ficha, hash_datos=hash_datos, texto=plantilla,
+            origen_texto="plantilla", modelo=None, motivo_fallback="sin_clave",
+            llamadas_ia=0, ahora=ahora,
+        )
+        return _resumen_de(r, nuevo=True)
+    # 4. Presupuesto del día agotado: plantilla, sin llamar.
+    if _llamadas_hoy(db, ahora) >= settings.GEMINI_MAX_LLAMADAS_DIA:
+        r = _persistir(
+            db, tipo=tipo, alcance=alcance, fecha_referencia=fecha_referencia,
+            ficha=ficha, hash_datos=hash_datos, texto=plantilla,
+            origen_texto="plantilla", modelo=None, motivo_fallback="cuota_diaria",
+            llamadas_ia=0, ahora=ahora,
+        )
+        return _resumen_de(r, nuevo=True)
+    # 5. Llamar a Gemini.
+    cliente_propio = cliente is None
+    c = cliente if cliente is not None else ClienteGemini()
+    try:
+        resultado = c.generar(
+            INSTRUCCION_SISTEMA,
+            json.dumps(ficha, ensure_ascii=False),
+        )
+    finally:
+        if cliente_propio:
+            c.close()
+    llamadas = resultado.llamadas_gastadas
+    if resultado.exito and resultado.texto is not None:
+        motivo_validacion = validar(resultado.texto, ficha)
+        if motivo_validacion is None:
+            r = _persistir(
+                db, tipo=tipo, alcance=alcance, fecha_referencia=fecha_referencia,
+                ficha=ficha, hash_datos=hash_datos, texto=resultado.texto,
+                origen_texto="gemini", modelo=resultado.modelo,
+                motivo_fallback=None, llamadas_ia=llamadas, ahora=ahora,
+            )
+            return _resumen_de(r, nuevo=True)
+        # El texto no pasa validación: plantilla con el motivo.
+        r = _persistir(
+            db, tipo=tipo, alcance=alcance, fecha_referencia=fecha_referencia,
+            ficha=ficha, hash_datos=hash_datos, texto=plantilla,
+            origen_texto="plantilla", modelo=None,
+            motivo_fallback=motivo_validacion, llamadas_ia=llamadas, ahora=ahora,
+        )
+        return _resumen_de(r, nuevo=True)
+    # 6. Falla del cliente (sin texto): plantilla con su motivo.
+    motivo = resultado.motivo_fallo or "error_api"
+    r = _persistir(
+        db, tipo=tipo, alcance=alcance, fecha_referencia=fecha_referencia,
+        ficha=ficha, hash_datos=hash_datos, texto=plantilla,
+        origen_texto="plantilla", modelo=None,
+        motivo_fallback=motivo, llamadas_ia=llamadas, ahora=ahora,
+    )
+    return _resumen_de(r, nuevo=True)
+def _alcances_disponibles(db: Session, tipo: str, ahora: datetime) -> list[str]:
+    """Lista de alcances posibles para ese tipo.
+    - `auditoria_pronostico`: solo `global` (la ficha resume el proyecto).
+    - `estado_ciudad`: `global` + las ciudades que aparecen hoy en las
+      lecturas recientes.
+    """
+    if tipo == "auditoria_pronostico":
+        return [CIUDAD_GLOBAL]
+    if tipo == "estado_ciudad":
+        filas = _lecturas_recientes(db, ahora)
+        por_ciudad = _agrupar_por_ciudad(filas)
+        return [CIUDAD_GLOBAL] + sorted(por_ciudad.keys())
+    raise ValueError(f"tipo de reporte desconocido: {tipo!r}")
+@dataclass
+class ResumenGeneracion:
+    """Resumen agregado de una corrida de generación."""
+    totales: int = 0
+    nuevos: int = 0
+    reutilizados: int = 0
+    por_origen: dict[str, int] = field(default_factory=dict)
+    por_motivo_fallback: dict[str, int] = field(default_factory=dict)
+    reportes: list[ResumenReporte] = field(default_factory=list)
+    def a_dict(self) -> dict[str, Any]:
+        return {
+            "totales": self.totales,
+            "nuevos": self.nuevos,
+            "reutilizados": self.reutilizados,
+            "por_origen": dict(sorted(self.por_origen.items())),
+            "por_motivo_fallback": dict(sorted(self.por_motivo_fallback.items())),
+            "reportes": [r.a_dict() for r in self.reportes],
+        }
+def generar_reportes(
+    db: Session,
+    *,
+    tipo: Optional[str] = None,
+    alcance: Optional[str] = None,
+    forzar_plantilla: bool = False,
+    ahora: Optional[datetime] = None,
+    cliente: Optional[ClienteGemini] = None,
+) -> ResumenGeneracion:
+    """Itera sobre los tipos y alcances pedidos y genera cada uno.
+    - `tipo=None`: ambos tipos (`estado_ciudad`, `auditoria_pronostico`).
+    - `alcance=None`: todos los alcances disponibles para cada tipo.
+    Devuelve un `ResumenGeneracion` con el agregado y el detalle por reporte.
+    """
+    ahora = ahora or utcnow()
+    tipos = [tipo] if tipo is not None else list(("estado_ciudad", "auditoria_pronostico"))
+    resumen = ResumenGeneracion()
+    for t in tipos:
+        alcances = [alcance] if alcance is not None else _alcances_disponibles(db, t, ahora)
+        for a in alcances:
+            r = generar_reporte(
+                db, t, a,
+                forzar_plantilla=forzar_plantilla,
+                ahora=ahora,
+                cliente=cliente,
+            )
+            resumen.reportes.append(r)
+            resumen.totales += 1
+            if r.nuevo:
+                resumen.nuevos += 1
+            else:
+                resumen.reutilizados += 1
+            resumen.por_origen[r.origen_texto] = (
+                resumen.por_origen.get(r.origen_texto, 0) + 1
+            )
+            if r.motivo_fallback:
+                resumen.por_motivo_fallback[r.motivo_fallback] = (
+                    resumen.por_motivo_fallback.get(r.motivo_fallback, 0) + 1
+                )
+    return resumen
