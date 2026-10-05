@@ -4,6 +4,8 @@ import helmet from "helmet";
 import morgan from "morgan";
 import type { AppConfig } from "./config/env";
 import { errorHandler, notFoundHandler } from "./middlewares/errorHandler";
+import { requestIdMiddleware } from "./middlewares/requestId";
+import { createApiRouter } from "./routes/api";
 import { createHealthRouter } from "./routes/health";
 
 /**
@@ -44,13 +46,21 @@ export function createApp(config: AppConfig): Express {
     }),
   );
 
-  // 4. Rutas
-  app.use(createHealthRouter(config));
+  // 4. X-Request-Id: antes de las rutas, para que TODA respuesta lo lleve
+  //    (incluido el 404 y los errores). El cliente del engine lo propaga.
+  app.use(requestIdMiddleware);
 
-  // 5. 404: si ninguna ruta respondió, llega acá.
+  // 5. Rutas. Health primero: sirve /health (simple) y /api/health
+  //    (agregado, con estado del engine). Después el router de la API
+  //    pública con lista blanca (D76), montado bajo /api.
+  app.use(createHealthRouter(config));
+  app.use("/api", createApiRouter(config));
+
+  // 6. 404: si ninguna ruta respondió, llega acá. Cubre también /internal/*
+  //    si alguien lo intenta por el gateway (D44: no se proxia).
   app.use(notFoundHandler);
 
-  // 6. Manejo de errores: SIEMPRE el último.
+  // 7. Manejo de errores: SIEMPRE el último.
   app.use(errorHandler);
 
   return app;

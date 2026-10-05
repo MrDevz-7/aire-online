@@ -1,19 +1,25 @@
 # Docker Compose para el entorno de DESARROLLO LOCAL de AirE_Online.
 #
-# Levanta un único servicio: Postgres. El engine (FastAPI) se corre
-# fuera de Docker durante el desarrollo, con el venv, y se conecta acá.
+# Levanta TRES servicios, encadenados por healthchecks:
+#   postgres (healthy) -> engine (healthy) -> gateway
 #
-# Vive en la raíz del monorepo porque la base de datos es infraestructura
-# compartida del proyecto, no un detalle interno de /engine.
+# El engine (FastAPI) y el gateway (Express) también se pueden correr
+# fuera de Docker durante el desarrollo (con venv y npm respectivamente),
+# pero en M7 el flujo oficial es levantarlos con Compose para verificar
+# el contrato de punta a punta.
+#
+# Vive en la raíz del monorepo porque la infraestructura es compartida
+# del proyecto, no un detalle interno de /engine ni de /gateway.
 #
 # Uso (desde la raíz del repo):
-#   docker compose up -d        # levanta Postgres
-#   docker compose ps           # estado (debe decir "healthy")
-#   docker compose down         # apaga y borra el CONTENEDOR (los datos quedan)
+#   docker compose up -d --build     # construye y levanta todo
+#   docker compose ps                # estado (los 3 deben decir "healthy")
+#   docker compose logs -f engine    # logs en vivo de un servicio
+#   docker compose down              # apaga (los datos de Postgres quedan)
 #   NUNCA usar `down -v` salvo que quieras borrar la base a propósito.
-
-# Fija el nombre del proyecto Compose. Sin esto Compose usaría el nombre
-# de la carpeta; con esto, el volumen se llama siempre aire_online_pgdata.
+#
+# Migraciones: se corren aparte, una sola vez (o cuando cambien):
+#   docker compose run --rm engine alembic upgrade head
 name: aire_online
 
 services:
@@ -43,6 +49,105 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  engine:
+    # Build desde la carpeta ./engine. El Dockerfile ya existe (M1/M2):
+    # usa la imagen de Playwright como base (M12 decidirá si eso se
+    # optimiza; hoy no molesta y el módulo no la usa).
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    container_name: aire_online_engine
+    restart: unless-stopped
+    # env_file lee las variables del .env del engine (que NO se commitea).
+    # Ahí viven OPENAQ_API_KEY, AQICN_TOKEN, GEMINI_API_KEYS, etc.
+    # Si el archivo no existe, Compose avisa pero igual arranca; las
+    # variables faltantes toman su default del código (Settings()).
+    env_file:
+      - ./engine/.env
+    environment:
+      # Sobrescribe la DATABASE_URL del .env: dentro de Compose, la base
+      # no está en localhost, está en el servicio `postgres`. Compose crea
+      # un DNS interno donde `postgres` resuelve a la IP del contenedor.
+      # La interpolación ${POSTGRES_PASSWORD:-...} usa el mismo default
+      # que el servicio postgres, así no se pueden desincronizar.
+      DATABASE_URL: postgresql+psycopg2://aire_online:${POSTGRES_PASSWORD:-aire_online_dev}@postgres:5432/aire_online
+      ENVIRONMENT: development
+    ports:
+      # Solo 127.0.0.1: la persona sigue llamando /internal/* directo
+      # al engine desde su PC (D44), pero el puerto no queda expuesto a
+      # la red local. El gateway lo alcanza por la red interna de Compose
+      # (`http://engine:8000`), no por este puerto publicado.
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        # condition: service_healthy espera a que el healthcheck de
+        # postgres pase a `healthy`, no solo a que el contenedor arranque.
+        # Sin esto, el engine puede intentar conectar antes de que
+        # Postgres esté listo para aceptar conexiones.
+        condition: service_healthy
+    healthcheck:
+      # Healthcheck liviano con `python -c`: no requiere curl ni wget
+      # en la imagen. Llama a /api/health, que no depende de la base
+      # (por diseño: si la base se cae, el engine sigue respondiendo y
+      # el gateway puede dar un 503 limpio en vez de un cuelgue).
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/health', timeout=3).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # start_period: le da margen al arranque del engine (imports de
+      # FastAPI, SQLAlchemy, etc.) antes de empezar a contar fallos.
+      start_period: 20s
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: aire_online_gateway
+    restart: unless-stopped
+    environment:
+      # NODE_ENV=production: el Dockerfile del gateway ya lo setea en la
+      # etapa de runtime, pero lo repetimos acá para que el compose sea
+      # autocontenido y no dependa de leer el Dockerfile.
+      NODE_ENV: production
+      PORT: 4000
+      # Origen del frontend permitido por CORS. Hoy es el Next.js local.
+      # El código del gateway usa CORS_ORIGINS (plural, lista separada por
+      # coma); en Bloque 4 se agregan ENGINE_URL y ENGINE_TIMEOUT_MS.
+      CORS_ORIGINS: http://localhost:3000
+      # URL del engine por la red interna de Compose (nombre de servicio,
+      # NO localhost). La usará el cliente HTTP del Bloque 4.
+      ENGINE_URL: http://engine:8000
+      # Timeout del cliente del engine. El código del Bloque 4 lo leerá;
+      # en Bloque 3 queda como valor por defecto listo para usar.
+      ENGINE_TIMEOUT_MS: "8000"
+    ports:
+      # El gateway SÍ se publica al host sin restricción de IP: es la
+      # puerta de entrada pública (el frontend y cualquier consumidor
+      # externo hablan con él, no con el engine).
+      - "4000:4000"
+    depends_on:
+      engine:
+        condition: service_healthy
+    healthcheck:
+      # node -e con fetch (nativo en Node 20+): no requiere curl ni wget,
+      # que no están en node:24-alpine por defecto.
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://localhost:4000/health')
+          .then(r => process.exit(r.ok ? 0 : 1))
+          .catch(() => process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   # Nombre final en Docker: aire_online_pgdata (proyecto + clave).
