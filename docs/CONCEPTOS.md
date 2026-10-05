@@ -76,6 +76,29 @@ Registro de los conceptos aprendidos en cada módulo del proyecto. Se completa a
 - **"Pedir 7 días" ≠ "tener 7 días"**: `forecast_days=7` es lo que se pide; lo que se guarda es lo que tenga 24 h no nulas. La medición real (Bloque 1) dio 3 días útiles con los últimos 3 vacíos o casi vacíos. Documentar el horizonte real y no el pedido es lo que separa un sistema honesto de uno que promete más de lo que puede entregar (D33).
 - **Misma escala antes de restar**: comparar un pronóstico en µg/m³ con una lectura real en AQI es restar metros contra grados Celsius. Se convierten ambos a la misma escala antes de calcular el error. En este caso se convierte el pronóstico (a AQI) porque la tabla EPA ya existe en M5a, mientras que la conversión inversa (AQI → µg/m³) es ambigua por los tramos. Y hay un tercer grupo de contaminantes (o3, no2, so2, co) que NO se auditan: pasar µg/m³ a ppb/ppm requiere peso molecular y condiciones de temperatura/presión, y no se inventa un número. Se capturan, pero se marcan como `no_auditable`, sin ambigüedad.
 
+## M6 — Reportes en lenguaje natural con Gemini
+
+- **El LLM narra, el código calcula.** Gemini recibe una ficha de datos ya construida (cifras, fuentes, fecha, cobertura, limitaciones, atribuciones) y la cuenta en español. Nunca calcula, nunca estima, nunca completa datos que no estén en la ficha. Si el dato no está, lo dice.
+- **Validar la salida con código.** Todo número del texto de Gemini tiene que poder rastrearse a la ficha (mismo valor tras normalizar coma/punto y admitir redondeo). Si un número no matchea, o si aparece un término prohibido ("machine learning", "garantiza", "con certeza"), o si el texto supera el largo máximo, se descarta el texto y se usa la plantilla determinística. El motivo del descarte queda registrado en `reportes.motivo_fallback`.
+- **La lectura nunca llama al modelo.** `GET /api/reportes/{tipo}` sirve lo ya persistido. La generación es explícita (`POST /internal/reportes/generar`) y solo se dispara cuando alguien la pide. Consecuencia: el frontend puede mostrar reportes aunque Gemini esté caído o la cuota esté agotada.
+- **Fallback determinístico siempre disponible.** Si no hay clave, si se agotó el tope diario del proyecto, si Gemini falla o si el texto no pasa el validador, se usa una plantilla en código normal que dice exactamente lo mismo que la ficha, sin agregar ni omitir datos. El producto funciona, es honesto, y no depende de la disponibilidad de un servicio externo.
+- **Caché por hash de la ficha.** Un reporte se identifica por `(tipo, alcance, fecha_referencia, sha256 de la ficha)`. Si la ficha no cambió, se reutiliza el reporte existente y no se vuelve a llamar a Gemini. Como el hash no incluye campos de tiempo de generación, dos corridas con los mismos datos producen la misma clave.
+- **Muestra chica: sin cifra.** El promedio de error de la auditoría solo se publica si hay al menos `MIN_DIAS_AUDITADOS_PARA_PROMEDIO` días objetivo distintos con auditorías calculadas por (contaminante, horizonte). Se cuentan días, no filas: estaciones que comparten celda de la grilla comparten pronóstico y no son muestras independientes. Con menos días, la ficha dice "todavía no hay suficientes días auditados" y no se publica ninguna cifra de error.
+
+## Uso de Gemini y privacidad
+
+Gemini se usa en el nivel gratuito de Google AI Studio, sin tarjeta ni billing. La clave se crea en `https://aistudio.google.com/apikey` y vive solo en el `.env` local; nunca se commitea.
+
+**Qué se envía a Gemini:** la ficha de datos, que contiene únicamente cifras agregadas públicas de calidad del aire (promedios por ciudad, conteos de auditorías, fechas, atribuciones de fuentes). No se envían datos personales, datos de usuarios, ni texto libre de terceros. Los nombres de estación que aparecen en la ficha vienen de fuentes públicas (IBOCA, SIATA, AQICN) y se tratan como datos, nunca como instrucciones.
+
+**Condiciones del nivel gratuito:** Google puede usar el contenido enviado para mejorar sus productos. Es aceptable porque solo se envían cifras agregadas y públicas. Los límites por modelo del nivel gratuito ya no se publican; se ven por proyecto en la consola de AI Studio. Por eso el proyecto tiene un tope diario configurable (`GEMINI_MAX_LLAMADAS_DIA`, default 10) y fallback determinístico: si la cuota se agota, el producto sigue funcionando con plantilla.
+
+**Modelo principal:** `gemini-3.8-flash`. Lista de reserva por `GEMINI_MODELOS_FALLBACK` (`gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`), que se prueban en orden si el principal no está disponible.
+
+**Resiliencia medida en la corrida real:** el 503 (`UNAVAILABLE`) de `gemini-3.8-flash` es recurrente. La estrategia que funciona es rotar keys del mismo modelo (hasta que una responda) y cascada de modelos si todas fallan. Con 6 keys configuradas, la corrida real gastó entre 2 y 6 requests por reporte antes de encontrar una combinación que respondiera.
+
+**Tope por reporte:** `GEMINI_MAX_INTENTOS_POR_REPORTE` (default 40) acota las rotaciones y reintentos de un solo reporte. Es defensa contra un bucle accidental; el tope diario es la protección real de cuota.
+
 ## Atribución requerida
 
 Los datos de calidad del aire de Open-Meteo Air Quality API provienen, para el dominio global (`cams_global`), del **Copernicus Atmosphere Monitoring Service (CAMS)** de ECMWF. Cualquier texto público que use estos datos debe atribuir tanto al proveedor de los datos (CAMS/ECMWF) como a Open-Meteo como API que los expone.
