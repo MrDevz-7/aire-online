@@ -2,11 +2,15 @@
 Configuración central de la aplicación, tipada con pydantic-settings.
 """
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
     DATABASE_URL: str = "postgresql+psycopg2://aire_online:aire_online_dev@localhost:5432/aire_online"
+
     OPENAQ_API_KEY: str = ""
     AQICN_TOKEN: str = ""
+
     # --- Gemini (M6) ---
     # Una o más keys separadas por coma. El cliente las rota ante
     # 401/403, 429 y 503 antes de pasar al siguiente modelo.
@@ -19,9 +23,20 @@ class Settings(BaseSettings):
     # Peor caso: N keys × M modelos + N (reintento si hay 1 sola key).
     GEMINI_MAX_INTENTOS_POR_REPORTE: int = 40
     GEMINI_TIMEOUT_S: int = 60
+
     # --- Reportes (M6) ---
     MIN_DIAS_AUDITADOS_PARA_PROMEDIO: int = 3
     REPORTE_MAX_CARACTERES_TEXTO: int = 4000
+
+    # --- Lectura pública (M7, D74) ---
+    # Lista separada por comas de fuentes cuyo histórico NO se expone
+    # público en `/api/estaciones/{id}/lecturas`: para esas fuentes el
+    # endpoint devuelve solo el último snapshot (una lectura por
+    # contaminante) y marca `historico_restringido: true`. Default vacío
+    # = historial completo para todas las fuentes.
+    FUENTES_SIN_HISTORICO_PUBLICO: str = ""
+
     # development | production
     ENVIRONMENT: str = "development"
+
 settings = Settings()

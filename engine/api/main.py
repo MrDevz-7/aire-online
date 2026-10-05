@@ -1,25 +1,35 @@
 """
 App principal de FastAPI (engine de AirE_Online).
+
 Se corre con: python -m uvicorn api.main:app --reload --port 8000
 (desde la carpeta engine/, con el venv activado)
+
 Expone /api/health, los endpoints internos de ingestión manual (M3:
 OpenAQ, AQICN; M4: IBOCA, SIATA), los de reconciliación (M5a), el de
 auditoría de pronóstico (M5b) y el de captura de pronósticos de
 Open-Meteo (M5c). Desde M6 expone además el disparo manual de generación
 de reportes (`POST /internal/reportes/generar`) y la lectura del último
-reporte persistido (`GET /api/reportes/{tipo}`). Los endpoints de dominio
-(estaciones, lecturas, alertas) llegan en módulos posteriores.
+reporte persistido (`GET /api/reportes/{tipo}`). Desde M7 expone el
+contrato de lectura bajo `/api/*` (D45, D75): estaciones, lecturas y
+atribuciones (Bloque 1), y en el Bloque 2 se agregan estado, alertas y
+auditoría/resumen.
 """
 import asyncio
 import logging
 import sys
-from fastapi import Depends, FastAPI, HTTPException
+from datetime import datetime
+
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
+
 from api.schemas import (
+    AtribucionesResponse,
+    EstacionesListResponse,
     HealthResponse,
+    LecturasListResponse,
     ReporteResponse,
     ResumenAuditoriaResponse,
     ResumenCapturaPronosticosResponse,
@@ -38,6 +48,14 @@ from services.ingestion import (
     ejecutar_openaq,
     ejecutar_siata,
 )
+from services.lectura import (
+    LIMITE_DEFAULT,
+    LIMITE_MAXIMO,
+    EstacionNoEncontrada,
+    listar_atribuciones,
+    listar_estaciones,
+    listar_lecturas,
+)
 from services.pronosticos import capturar_pronosticos
 from services.reconciliacion import calcular_comparaciones, calcular_emparejamientos
 from services.reportes import generar_reportes
@@ -46,17 +64,21 @@ from sources.iboca import IBOCAError
 from sources.open_meteo import OpenMeteoConfigError, OpenMeteoError
 from sources.openaq import OpenAQConfigError, OpenAQError
 from sources.siata import SIATAError
+
 # En Windows se fuerza la política de event loop "Proactor". Inocua en
 # Linux/macOS (el if la ignora).
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 app = FastAPI(
     title="AirE_Online Engine API",
     description="Reconciliación y auditoría de calidad del aire para Colombia.",
     version="0.1.0",
 )
+
 # CORS: qué orígenes de navegador pueden llamar a esta API. Hoy solo el
 # frontend local. El origen de producción se agrega al desplegar.
 app.add_middleware(
@@ -66,6 +88,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 class ForceUTF8JSONMiddleware(BaseHTTPMiddleware):
     """
     FastAPI no incluye `charset=utf-8` en el header Content-Type de sus
@@ -81,7 +105,11 @@ class ForceUTF8JSONMiddleware(BaseHTTPMiddleware):
         if content_type.startswith("application/json") and "charset" not in content_type:
             response.headers["content-type"] = "application/json; charset=utf-8"
         return response
+
+
 app.add_middleware(ForceUTF8JSONMiddleware)
+
+
 @app.get("/api/health", response_model=HealthResponse)
 def health_check() -> HealthResponse:
     """
@@ -92,6 +120,8 @@ def health_check() -> HealthResponse:
     como endpoint separado (ej. /api/health/db).
     """
     return HealthResponse(status="ok", environment=settings.ENVIRONMENT)
+
+
 # ---------------------------------------------------------------------------
 # TEMPORAL: endpoints de ingestión manual, solo para probar M3 y M4 a mano.
 #   - En M7 quedan detrás del gateway (no se exponen directo).
@@ -110,9 +140,12 @@ def ingest_openaq(db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=503, detail=str(exc))
     except OpenAQError as exc:
         raise HTTPException(status_code=502, detail=f"OpenAQ falló: {exc}")
+
+
 @app.post("/internal/ingest/aqicn", response_model=ResumenIngestionResponse, tags=["internal"])
 def ingest_aqicn(db: Session = Depends(get_db)) -> dict:
     """Descarga AQICN (Colombia) y la escribe en la base. Devuelve un resumen.
+
     Tarda decenas de segundos: el descubrimiento por cuadrantes hace ~90
     requests y luego se pide el detalle de cada estación.
     """
@@ -122,9 +155,12 @@ def ingest_aqicn(db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=503, detail=str(exc))
     except AQICNError as exc:
         raise HTTPException(status_code=502, detail=f"AQICN falló: {exc}")
+
+
 @app.post("/internal/ingest/iboca", response_model=ResumenIngestionResponse, tags=["internal"])
 def ingest_iboca(db: Session = Depends(get_db)) -> dict:
     """Descarga IBOCA (Bogotá) y la escribe en la base. Devuelve un resumen.
+
     IBOCA no requiere clave. El cliente devuelve un ResultadoDescarga
     vacío con `abortada` si el servicio falla; ese caso NO lanza
     excepción, así que la respuesta es 200 con el motivo en `abortada`.
@@ -133,6 +169,8 @@ def ingest_iboca(db: Session = Depends(get_db)) -> dict:
         return ejecutar_iboca(db).a_dict()
     except IBOCAError as exc:
         raise HTTPException(status_code=502, detail=f"IBOCA falló: {exc}")
+
+
 @app.post("/internal/ingest/siata", response_model=ResumenIngestionResponse, tags=["internal"])
 def ingest_siata(db: Session = Depends(get_db)) -> dict:
     """Descarga SIATA (Valle de Aburrá) y la escribe en la base. Hace 5
@@ -141,6 +179,8 @@ def ingest_siata(db: Session = Depends(get_db)) -> dict:
         return ejecutar_siata(db).a_dict()
     except SIATAError as exc:
         raise HTTPException(status_code=502, detail=f"SIATA falló: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # TEMPORAL: endpoints de reconciliación, auditoría y captura de pronósticos
 # manuales, solo para probar M5a/M5b/M5c a mano.
@@ -159,9 +199,12 @@ def ingest_siata(db: Session = Depends(get_db)) -> dict:
 def reconciliacion_emparejar(db: Session = Depends(get_db)) -> dict:
     """Calcula (o actualiza) los emparejamientos entre estaciones activas
     de fuentes distintas dentro de RADIO_EMPAREJAMIENTO_KM.
+
     Ver services/reconciliacion.py.
     """
     return calcular_emparejamientos(db).a_dict()
+
+
 @app.post(
     "/internal/reconciliacion/comparar",
     response_model=ResumenComparacionResponse,
@@ -173,15 +216,20 @@ def reconciliacion_comparar(db: Session = Depends(get_db)) -> dict:
     falta. Ver services/reconciliacion.py.
     """
     return calcular_comparaciones(db).a_dict()
+
+
 @app.post("/internal/audit/run", response_model=ResumenAuditoriaResponse, tags=["internal"])
 def audit_run(db: Session = Depends(get_db)) -> dict:
     """Resuelve las auditorías pendientes cuyo día objetivo ya terminó.
+
     'Ya terminó' se mide en hora local Colombia. Si el día todavía no
     terminó, la auditoría se deja como `pendiente` (no se calcula con
     datos parciales). Idempotente: la segunda corrida seguida no hace
     nada (no hay pendientes vencidas nuevas). Ver services/auditoria.py.
     """
     return calcular_auditorias(db).a_dict()
+
+
 @app.post(
     "/internal/pronosticos/capturar",
     response_model=ResumenCapturaPronosticosResponse,
@@ -190,6 +238,7 @@ def audit_run(db: Session = Depends(get_db)) -> dict:
 def pronosticos_capturar(db: Session = Depends(get_db)) -> dict:
     """Captura pronósticos de Open-Meteo para las estaciones AQICN activas
     con lecturas recientes (D62).
+
     Idempotente: `ON CONFLICT DO NOTHING` sobre el UNIQUE de `pronosticos`.
     La PRIMERA captura del día gana; una segunda corrida el mismo día
     devuelve `pronosticos_insertados: 0` y `pronosticos_ya_existian: N`.
@@ -203,6 +252,8 @@ def pronosticos_capturar(db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=503, detail=str(exc))
     except OpenMeteoError as exc:
         raise HTTPException(status_code=502, detail=f"Open-Meteo falló: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # M6: reportes en lenguaje natural (Bloque 6).
 #   - POST /internal/reportes/generar: disparo manual, administrativo.
@@ -222,6 +273,7 @@ def reportes_generar(
     db: Session = Depends(get_db),
 ) -> dict:
     """Genera reportes en lenguaje natural (M6).
+
     - `tipo`: `estado_ciudad` o `auditoria_pronostico`. Si se omite, genera
       para ambos.
     - `alcance`: ciudad (por ejemplo "Bogotá"), "global", o una lista de
@@ -230,6 +282,7 @@ def reportes_generar(
     - `forzar_plantilla=true`: usa la plantilla determinística sin llamar
       a Gemini (`motivo_fallback='forzado'`). Útil para probar sin gastar
       cuota.
+
     Devuelve un resumen: totales, nuevos, reutilizados (por caché de
     hash), y el desglose por origen y por motivo de fallback.
     """
@@ -239,6 +292,8 @@ def reportes_generar(
         ).a_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/api/reportes/{tipo}", response_model=ReporteResponse, tags=["api"])
 def reportes_get(
     tipo: str,
@@ -246,6 +301,7 @@ def reportes_get(
     db: Session = Depends(get_db),
 ) -> dict:
     """Devuelve el último reporte persistido del `tipo` indicado.
+
     Si `alcance` viene especificado, filtra por él. Si no, devuelve el más
     reciente de cualquier alcance. 404 si no hay ninguno. **Nunca llama a
     Gemini**: sirve lo ya persistido (D70).
@@ -273,3 +329,73 @@ def reportes_get(
         "motivo_fallback": r.motivo_fallback,
         "llamadas_ia": r.llamadas_ia,
     }
+
+
+# ---------------------------------------------------------------------------
+# M7 Bloque 1 — contrato de lectura (D75): estaciones, lecturas, atribuciones.
+# Solo lectura: no escriben en la base, no llaman a Gemini, no recalculan.
+# El prefijo /api/ es el contrato estable pensado para proxiarse (D45).
+# ---------------------------------------------------------------------------
+@app.get("/api/estaciones", response_model=EstacionesListResponse, tags=["api"])
+def api_estaciones(
+    ciudad: str | None = None,
+    fuente: str | None = None,
+    activa: bool | None = None,
+    limit: int = Query(default=LIMITE_DEFAULT, ge=1, le=LIMITE_MAXIMO),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Estaciones registradas (D75.1).
+
+    Filtros opcionales: `ciudad` (nombre tal cual figura en `nombre` o
+    inferido de la fuente; sin acentos), `fuente`, `activa`. Paginado con
+    `limit` (default 100, máximo 500) y `offset`. Respuesta:
+    `{"items": [...], "total": N, "limit": L, "offset": O}`.
+    """
+    return listar_estaciones(
+        db, ciudad=ciudad, fuente=fuente, activa=activa, limit=limit, offset=offset
+    )
+
+
+@app.get(
+    "/api/estaciones/{estacion_id}/lecturas",
+    response_model=LecturasListResponse,
+    tags=["api"],
+)
+def api_estaciones_lecturas(
+    estacion_id: int,
+    desde: datetime | None = None,
+    hasta: datetime | None = None,
+    contaminante: str | None = None,
+    limit: int = Query(default=LIMITE_DEFAULT, ge=1, le=LIMITE_MAXIMO),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Lecturas de una estación (D75.2).
+
+    `desde`/`hasta` son ISO 8601 en UTC (ej. `2026-10-03T00:00:00Z`).
+    `contaminante` filtra por `pm25`, `pm10`, `o3`, `no2`, `so2`, `co` o
+    `aqi`. 404 si la estación no existe. Respeta el interruptor D74.
+    """
+    try:
+        return listar_lecturas(
+            db,
+            estacion_id,
+            desde=desde,
+            hasta=hasta,
+            contaminante=contaminante,
+            limit=limit,
+            offset=offset,
+        )
+    except EstacionNoEncontrada as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/atribuciones", response_model=AtribucionesResponse, tags=["api"])
+def api_atribuciones() -> dict:
+    """Atribuciones y estado de confirmación por fuente (D75.6).
+
+    El texto de atribución es el mismo que usan las fichas de M6: no se
+    duplica acá. Estático (no toca la base).
+    """
+    return listar_atribuciones()
