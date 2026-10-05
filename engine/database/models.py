@@ -39,18 +39,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-
 def utcnow() -> datetime:
     """Timestamp en UTC. Se evita datetime.utcnow() (deprecado en Python
     3.12+, ambiguo sobre timezone) a favor de datetime.now(timezone.utc)."""
     return datetime.now(timezone.utc)
-
-
 class Base(DeclarativeBase):
     pass
-
-
 # --------------------------------------------------------------------------
 # Valores permitidos de las enumeraciones (fuente única de verdad).
 # --------------------------------------------------------------------------
@@ -70,35 +64,28 @@ class Base(DeclarativeBase):
 # auditorias_pronostico.fuente_real, así que se agrega a todos por
 # consistencia. Migración aditiva: c3a4e2f5b8d1.
 FUENTES: tuple[str, ...] = ("openaq", "aqicn", "sisaire", "iboca", "siata", "open-meteo")
-
 # "pm1" (material particulado <1 micra, más fino que pm25) lo mide la red
 # IBOCA de Bogotá (M4). Sí es un contaminante del aire (a diferencia de un
 # índice compuesto como el UV, descartado en M3).
 CONTAMINANTES: tuple[str, ...] = ("pm1", "pm25", "pm10", "o3", "no2", "so2", "co", "aqi")
-
 # M5c 5.2 (D64): se agrega "no_auditable" para filas cuyo contaminante el
 # proyecto captura pero no sabe auditar todavía (o3, no2, so2, co). No es
 # un error: es la forma de decir "no se inventa una conversión". Migración
 # aditiva: d8e2f9a4b1c5b.
 ESTADOS_AUDITORIA: tuple[str, ...] = ("pendiente", "resuelta", "sin_datos", "no_auditable")
-
 TIPOS_ALERTA: tuple[str, ...] = ("umbral_aqi", "discrepancia_fuentes")
 SEVERIDADES_ALERTA: tuple[str, ...] = ("baja", "media", "alta", "critica")
 ESTADOS_ALERTA: tuple[str, ...] = ("nueva", "en_revision", "notificada", "normalizada")
-
 # Estado en que una alerta deja de estar "abierta" (lo usa el índice parcial).
 ESTADO_ALERTA_CERRADA = "normalizada"
-
 # --------------------------------------------------------------------------
 # M6: reportes en lenguaje natural (D70).
 # --------------------------------------------------------------------------
 # Tipos de reporte. Cada uno tiene su propio constructor de ficha y su
 # propia plantilla determinística.
 TIPOS_REPORTE: tuple[str, ...] = ("estado_ciudad", "auditoria_pronostico")
-
 # Quién redactó el texto: Gemini, o la plantilla determinística (fallback).
 ORIGENES_TEXTO: tuple[str, ...] = ("gemini", "plantilla")
-
 # Razón por la que se cayó a la plantilla. Solo se llena cuando
 # origen_texto='plantilla'. 'forzado' es la vía manual (endpoint con
 # forzar_plantilla=true) para probar sin gastar cuota.
@@ -112,8 +99,6 @@ MOTIVOS_FALLBACK: tuple[str, ...] = (
     "validacion_texto",
     "forzado",
 )
-
-
 def _enum(valores: tuple[str, ...], nombre_check: str) -> Enum:
     """Columna VARCHAR + CHECK con nombre. Se crea una instancia nueva por
     columna (no se comparte entre columnas)."""
@@ -124,8 +109,6 @@ def _enum(valores: tuple[str, ...], nombre_check: str) -> Enum:
         create_constraint=True,
         length=30,
     )
-
-
 class Estacion(Base):
     """Una estación física según UNA fuente. La misma estación real puede
     existir hasta tres veces (una por fuente); el vínculo entre ellas vive en
@@ -137,7 +120,6 @@ class Estacion(Base):
         # PostGIS. Este índice solo acelera filtros por caja de coordenadas.
         Index("ix_estaciones_latitud_longitud", "latitud", "longitud"),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
     fuente: Mapped[str] = mapped_column(_enum(FUENTES, "ck_estaciones_fuente"))
     id_externo: Mapped[str] = mapped_column(String(100))
@@ -150,11 +132,8 @@ class Estacion(Base):
     primera_vez_vista: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     ultima_vez_vista: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     metadatos: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-
     def __repr__(self) -> str:
         return f"<Estacion id={self.id} fuente={self.fuente!r} id_externo={self.id_externo!r}>"
-
-
 class Lectura(Base):
     """Una medición observada. Se guardan valor y unidad NATIVOS de la
     fuente: la conversión a una unidad común ocurre en M5, no acá."""
@@ -167,7 +146,6 @@ class Lectura(Base):
         Index("ix_lecturas_estacion_medido_en", "estacion_id", "medido_en"),
         Index("ix_lecturas_contaminante_medido_en", "contaminante", "medido_en"),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
     # RESTRICT: una estación con lecturas no se puede borrar por accidente.
     estacion_id: Mapped[int] = mapped_column(ForeignKey("estaciones.id", ondelete="RESTRICT"))
@@ -176,8 +154,6 @@ class Lectura(Base):
     unidad: Mapped[str] = mapped_column(String(20))
     medido_en: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     capturado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class Emparejamiento(Base):
     """Vínculo entre dos estaciones de fuentes distintas que se consideran la
     misma zona. Cada par se guarda UNA sola vez, en orden canónico
@@ -191,15 +167,12 @@ class Emparejamiento(Base):
         CheckConstraint("estacion_a_id < estacion_b_id", name="ck_emparejamientos_orden_canonico"),
         UniqueConstraint("estacion_a_id", "estacion_b_id", name="uq_emparejamientos_par"),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
     estacion_a_id: Mapped[int] = mapped_column(ForeignKey("estaciones.id", ondelete="RESTRICT"))
     estacion_b_id: Mapped[int] = mapped_column(ForeignKey("estaciones.id", ondelete="RESTRICT"))
     distancia_km: Mapped[float] = mapped_column(Float)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     activo: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
 class Comparacion(Base):
     """Resultado de comparar dos lecturas emparejadas en una ventana de
     tiempo. Almacén de resultados que llena M5."""
@@ -214,7 +187,6 @@ class Comparacion(Base):
             name="uq_comparaciones_emparejamiento_contaminante_ventana",
         ),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
     # CASCADE: es un resultado derivado; si se borra el emparejamiento, sus
     # comparaciones se pueden recalcular.
@@ -230,8 +202,6 @@ class Comparacion(Base):
     unidad_comun: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     diferencia_abs: Mapped[float] = mapped_column(Float)
     calculada_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class Pronostico(Base):
     """Una fila por valor diario pronosticado, de una fuente.
     Fuente actual (M5c): Open-Meteo Air Quality API (D58). El valor
@@ -255,7 +225,6 @@ class Pronostico(Base):
             name="uq_pronosticos_estacion_contaminante_objetivo_captura",
         ),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
     fuente: Mapped[str] = mapped_column(_enum(FUENTES, "ck_pronosticos_fuente"))
     estacion_id: Mapped[int] = mapped_column(ForeignKey("estaciones.id", ondelete="RESTRICT"))
@@ -271,8 +240,6 @@ class Pronostico(Base):
     # Día (hora local de Colombia) en que se capturó el pronóstico.
     fecha_captura: Mapped[date] = mapped_column(Date)
     capturado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class AuditoriaPronostico(Base):
     """El veredicto sobre un pronóstico: qué pasó realmente y cuánto se
     equivocó. Una auditoría por pronóstico (UNIQUE).
@@ -298,7 +265,6 @@ class AuditoriaPronostico(Base):
             postgresql_where=text("estado = 'pendiente'"),
         ),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
     # CASCADE: la auditoría es derivada del pronóstico.
     pronostico_id: Mapped[int] = mapped_column(ForeignKey("pronosticos.id", ondelete="CASCADE"))
@@ -324,8 +290,6 @@ class AuditoriaPronostico(Base):
     # si se procesó con el criterio viejo (M5b).
     horas_con_lectura: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     resuelta_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
 class Alerta(Base):
     """Tarjeta del kanban. El mensaje se arma con una plantilla de texto, no
     con Gemini. Sin usuarios todavía: llegan en M8."""
@@ -346,7 +310,6 @@ class Alerta(Base):
             postgresql_nulls_not_distinct=True,
         ),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
     tipo: Mapped[str] = mapped_column(_enum(TIPOS_ALERTA, "ck_alertas_tipo"))
     severidad: Mapped[str] = mapped_column(_enum(SEVERIDADES_ALERTA, "ck_alertas_severidad"))
@@ -366,11 +329,8 @@ class Alerta(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
     resuelta_en: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
 class Reporte(Base):
     """Reporte en lenguaje natural sobre resultados ya calculados (M6).
-
     Cada fila tiene DOS partes:
       1. `datos_entrada` (JSONB): la "ficha de datos" determinística — cifras,
          fuentes, fecha, cobertura, limitaciones y atribuciones. La construye
@@ -378,20 +338,16 @@ class Reporte(Base):
       2. `texto`: la narración en español. Puede venir de Gemini (redacta
          sobre la ficha) o de la plantilla determinística (fallback cuando
          Gemini no puede/no debe usarse).
-
     Gemini NUNCA calcula ni inventa cifras: recibe la ficha y la narra (D2,
     D70). La lectura de un reporte NUNCA llama a Gemini: se lee lo persistido.
-
     Idempotencia/caché por `(tipo, alcance, fecha_referencia, hash_datos)`
     (UNIQUE). Si la ficha no cambió, se reutiliza la fila existente y no se
     vuelve a llamar a Gemini. `hash_datos` es el sha256 del JSON canónico
     de la ficha, SIN campos de tiempo de generación: dos corridas con los
     mismos datos producen el mismo hash, y por lo tanto la misma clave.
-
     El largo máximo del texto se valida en código (validador de M6), no acá:
     la columna es TEXT sin límite duro para no rechazar un texto ya validado.
     """
-
     __tablename__ = "reportes"
     __table_args__ = (
         # Clave de caché semántica: mismo tipo + alcance + fecha + contenido
@@ -409,7 +365,6 @@ class Reporte(Base):
             "tipo", "alcance", "generado_en",
         ),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
     tipo: Mapped[str] = mapped_column(_enum(TIPOS_REPORTE, "ck_reportes_tipo"))
     # Ciudad (por ejemplo "Bogota", "Medellin") o "global" cuando el reporte
@@ -441,7 +396,12 @@ class Reporte(Base):
     motivo_fallback: Mapped[Optional[str]] = mapped_column(
         _enum(MOTIVOS_FALLBACK, "ck_reportes_motivo_fallback"), nullable=True
     )
-
+    # M6 Bloque 5 (D73): cuántas solicitudes HTTP gastó este reporte contra
+    # la API de Gemini. 0 si no se llamó (plantilla pura, caché, sin clave,
+    # cuota agotada). El presupuesto del día local es la suma de esta
+    # columna sobre los reportes del día. NULL solo en filas creadas
+    # antes de la migración e5b7d9f1a3c8.
+    llamadas_ia: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     def __repr__(self) -> str:
         return (
             f"<Reporte id={self.id} tipo={self.tipo!r} alcance={self.alcance!r} "

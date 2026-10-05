@@ -40,8 +40,10 @@ _CIUDADES_CONOCIDAS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 _ATRIBUCIONES: dict[str, str] = {
     "openaq": "OpenAQ (openaq.org)",
-    # AQICN exige atribuir al agregador Y a la agencia de origen de cada
-    # estación. Ver docs/CONCEPTOS.md, "Atribuciones de fuentes de datos".
+    # M6 Bloque 4.5: los términos de la API de WAQI exigen atribuir al
+    # World Air Quality Index Project Y a la agencia (EPA) de origen de
+    # cada estación (no alcanza con acreditar al agregador). Ver
+    # docs/CONCEPTOS.md, sección "Atribuciones de fuentes de datos".
     "aqicn": (
         "World Air Quality Index Project (aqicn.org) y las agencias "
         "de origen de cada estación"

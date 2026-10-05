@@ -113,4 +113,5 @@ erDiagram
         string origen_texto
         string modelo
         string motivo_fallback
+        int llamadas_ia
     }
