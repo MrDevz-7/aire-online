@@ -12,7 +12,7 @@ siempre coinciden campo a campo.
 from datetime import date, datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class HealthResponse(BaseModel):
@@ -213,3 +213,76 @@ class AtribucionItem(BaseModel):
 
 class AtribucionesResponse(BaseModel):
     items: list[AtribucionItem]
+
+
+# ---------------------------------------------------------------------------
+# M7 Bloque 2: contrato de lectura, parte 2 (D75.3, D75.4, D75.5)
+# ---------------------------------------------------------------------------
+class EstadoResponse(BaseModel):
+    """Ficha `estado_ciudad` (M6) expuesta tal cual por
+    `GET /api/estado` (D75.3).
+
+    Se declara con `extra="allow"`: la ficha se amplía ocasionalmente
+    (M6 le agregó `n_estaciones`, M7 podría agregar más campos) y el
+    contrato de lectura no debería romperse por un campo nuevo. Los
+    campos acá listados son los que el endpoint garantiza; cualquier
+    otro que venga en la ficha pasa sin recortarse."""
+    model_config = ConfigDict(extra="allow")
+
+    tipo: str
+    alcance: str
+    fecha_referencia: str
+    ciudades: list[dict]
+    limitaciones: list[str]
+    atribuciones: list[str]
+
+
+class AuditoriaResumenResponse(BaseModel):
+    """Ficha `auditoria_pronostico` (M6) expuesta tal cual por
+    `GET /api/auditoria/resumen` (D75.5).
+
+    Misma regla `extra="allow"` que `EstadoResponse`: no congelamos la
+    forma de la ficha en el contrato de lectura."""
+    model_config = ConfigDict(extra="allow")
+
+    tipo: str
+    alcance: str
+    fecha_referencia: str
+    mes_en_curso: str
+    conteos: dict
+    horizonte_maximo_dias: int
+    contaminantes_auditados: list[str]
+    contaminantes_no_auditables: list[str]
+    errores_por_contaminante_y_horizonte: list[dict]
+    limitaciones: list[str]
+    atribuciones: list[str]
+
+
+class AlertaItem(BaseModel):
+    """Una alerta abierta (D75.4). `ciudad` es un campo derivado: se
+    infiere de la estación asociada (alertas de `umbral_aqi`) o de las
+    estaciones del emparejamiento (alertas de `discrepancia_fuentes`),
+    con la misma noción de ciudad que usan las fichas de M6. Puede ser
+    `None` si no se pudo inferir."""
+    id: int
+    tipo: str
+    severidad: str
+    estado: str
+    estacion_id: Optional[int] = None
+    emparejamiento_id: Optional[int] = None
+    contaminante: str
+    valor_disparador: float
+    umbral: float
+    mensaje: str
+    creada_en: datetime
+    actualizada_en: datetime
+    resuelta_en: Optional[datetime] = None
+    ciudad: Optional[str] = None
+
+
+class AlertasListResponse(BaseModel):
+    """Envoltura paginada de alertas abiertas (D75.4)."""
+    items: list[AlertaItem]
+    total: int
+    limit: int
+    offset: int

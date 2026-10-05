@@ -10,9 +10,9 @@ auditoría de pronóstico (M5b) y el de captura de pronósticos de
 Open-Meteo (M5c). Desde M6 expone además el disparo manual de generación
 de reportes (`POST /internal/reportes/generar`) y la lectura del último
 reporte persistido (`GET /api/reportes/{tipo}`). Desde M7 expone el
-contrato de lectura bajo `/api/*` (D45, D75): estaciones, lecturas y
-atribuciones (Bloque 1), y en el Bloque 2 se agregan estado, alertas y
-auditoría/resumen.
+contrato de lectura completo bajo `/api/*` (D45, D75): estaciones,
+lecturas, atribuciones (Bloque 1), estado, alertas y auditoría/resumen
+(Bloque 2).
 """
 import asyncio
 import logging
@@ -26,7 +26,10 @@ from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from api.schemas import (
+    AlertasListResponse,
     AtribucionesResponse,
+    AuditoriaResumenResponse,
+    EstadoResponse,
     EstacionesListResponse,
     HealthResponse,
     LecturasListResponse,
@@ -41,6 +44,7 @@ from api.schemas import (
 from database.config import settings
 from database.models import Reporte
 from database.session import get_db
+from services.alertas import listar_alertas
 from services.auditoria import calcular_auditorias
 from services.ingestion import (
     ejecutar_aqicn,
@@ -58,7 +62,12 @@ from services.lectura import (
 )
 from services.pronosticos import capturar_pronosticos
 from services.reconciliacion import calcular_comparaciones, calcular_emparejamientos
-from services.reportes import generar_reportes
+from services.reportes import (
+    CIUDAD_GLOBAL,
+    construir_ficha_auditoria_pronostico,
+    construir_ficha_estado_ciudad,
+    generar_reportes,
+)
 from sources.aqicn import AQICNConfigError, AQICNError
 from sources.iboca import IBOCAError
 from sources.open_meteo import OpenMeteoConfigError, OpenMeteoError
@@ -399,3 +408,72 @@ def api_atribuciones() -> dict:
     duplica acá. Estático (no toca la base).
     """
     return listar_atribuciones()
+
+
+# ---------------------------------------------------------------------------
+# M7 Bloque 2 — contrato de lectura (D75): estado, alertas, auditoría.
+# Igual que el Bloque 1: solo lectura. Los endpoints 3 y 5 REUTILIZAN los
+# constructores de ficha de M6 (`construir_ficha_estado_ciudad` y
+# `construir_ficha_auditoria_pronostico`); no llaman a Gemini ni escriben
+# en la base. El endpoint 4 sí hace una consulta nueva (las alertas nunca
+# se leían hasta ahora).
+# ---------------------------------------------------------------------------
+@app.get("/api/estado", response_model=EstadoResponse, tags=["api"])
+def api_estado(
+    ciudad: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Estado actual reconciliado por ciudad (D75.3).
+
+    Filtro opcional `ciudad`. Si se omite, devuelve `alcance="global"`
+    (todas las ciudades con datos en la ventana de actividad). Reutiliza
+    el constructor de ficha de M6: **no llama a Gemini, no escribe en la
+    base** (la ficha se construye en el momento; lo persistido vive en
+    `reportes` y tiene su propio endpoint `GET /api/reportes/{tipo}`).
+    """
+    alcance = ciudad if ciudad else CIUDAD_GLOBAL
+    return construir_ficha_estado_ciudad(db, alcance)
+
+
+@app.get("/api/alertas", response_model=AlertasListResponse, tags=["api"])
+def api_alertas(
+    tipo: str | None = None,
+    ciudad: str | None = None,
+    limit: int = Query(default=LIMITE_DEFAULT, ge=1, le=LIMITE_MAXIMO),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Alertas abiertas (D75.4).
+
+    Filtros opcionales: `tipo` (`umbral_aqi` | `discrepancia_fuentes`),
+    `ciudad` (inferida de la estación asociada; se compara sin acentos).
+    Solo lectura: no crea ni modifica alertas, y excluye las ya
+    `normalizada`. Paginado con `limit`/`offset`.
+    """
+    return listar_alertas(
+        db, tipo=tipo, ciudad=ciudad, limit=limit, offset=offset
+    )
+
+
+@app.get(
+    "/api/auditoria/resumen",
+    response_model=AuditoriaResumenResponse,
+    tags=["api"],
+)
+def api_auditoria_resumen(
+    mes: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Resumen de auditoría del pronóstico (D75.5).
+
+    `mes` en formato `YYYY-MM`; si se omite, el mes en curso en hora local
+    Colombia. Reutiliza el constructor de ficha de M6: **no llama a
+    Gemini, no escribe en la base**.
+    """
+    if mes is not None:
+        partes = mes.split("-")
+        if len(partes) != 2 or not all(p.isdigit() and len(p) > 0 for p in partes):
+            raise HTTPException(
+                status_code=400, detail="mes debe ser 'YYYY-MM' (ej. 2026-09)"
+            )
+    return construir_ficha_auditoria_pronostico(db, mes=mes)
