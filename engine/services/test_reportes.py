@@ -15,13 +15,11 @@ Se corren con:
     python -m unittest services.test_reportes -v
 """
 from __future__ import annotations
-
 import re
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
-
 from services.reportes import (
     CIUDAD_GLOBAL,
     construir_ficha_auditoria_pronostico,
@@ -30,14 +28,10 @@ from services.reportes import (
     plantilla_auditoria_pronostico,
     plantilla_estado_ciudad,
 )
-
 HOY_FIJO = datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc)  # 12:00 local
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def _fila(
     id_: int, fuente: str, nombre: str, contaminante: str,
     valor: float, unidad: str, medido_en: datetime,
@@ -46,49 +40,37 @@ def _fila(
         id=id_, fuente=fuente, nombre=nombre, contaminante=contaminante,
         valor=valor, unidad=unidad, medido_en=medido_en,
     )
-
-
 def _normalizar_numero(s: str) -> str:
     """Saca signo y ceros a la derecha: '3.210' -> '3.21'; '-3.21' -> '3.21'."""
     s = s.lstrip("-+")
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s or "0"
-
-
 # ---------------------------------------------------------------------------
 # Hash canónico (puro)
 # ---------------------------------------------------------------------------
-
 class TestHashCanonico(unittest.TestCase):
     def test_mismo_contenido_distinto_orden_mismo_hash(self) -> None:
         a = {"b": 2, "a": 1, "c": [3, 4]}
         b = {"a": 1, "c": [3, 4], "b": 2}
         self.assertEqual(hash_canonico(a), hash_canonico(b))
-
     def test_anidado_con_distinto_orden_mismo_hash(self) -> None:
         a = {"outer": {"y": 2, "x": 1}}
         b = {"outer": {"x": 1, "y": 2}}
         self.assertEqual(hash_canonico(a), hash_canonico(b))
-
     def test_contenido_distinto_hash_distinto(self) -> None:
         self.assertNotEqual(hash_canonico({"v": 10}), hash_canonico({"v": 11}))
-
     def test_hash_es_sha256_hex(self) -> None:
         h = hash_canonico({"x": 1})
         self.assertEqual(len(h), 64)
         int(h, 16)
-
     def test_orden_de_lista_importa(self) -> None:
         self.assertNotEqual(
             hash_canonico({"xs": [1, 2, 3]}), hash_canonico({"xs": [3, 2, 1]})
         )
-
-
 # ---------------------------------------------------------------------------
 # Plantillas (puras)
 # ---------------------------------------------------------------------------
-
 def _ficha_estado_ciudad_ejemplo(**overrides) -> dict:
     ficha = {
         "tipo": "estado_ciudad",
@@ -113,12 +95,13 @@ def _ficha_estado_ciudad_ejemplo(**overrides) -> dict:
             "Cobertura real hoy: Bogotá y Valle de Aburrá.",
             "Los valores son promedios de estaciones puntuales.",
         ],
-        "atribuciones": ["OpenAQ (openaq.org)", "AQICN/WAQI (aqicn.org)"],
+        "atribuciones": [
+            "OpenAQ (openaq.org)",
+            "World Air Quality Index Project (aqicn.org) y las agencias de origen de cada estación",
+        ],
     }
     ficha.update(overrides)
     return ficha
-
-
 def _ficha_auditoria_ejemplo(**overrides) -> dict:
     ficha = {
         "tipo": "auditoria_pronostico",
@@ -146,34 +129,26 @@ def _ficha_auditoria_ejemplo(**overrides) -> dict:
         "atribuciones": [
             "Copernicus Atmosphere Monitoring Service (CAMS), "
             "vía Open-Meteo Air Quality API",
-            "AQICN/WAQI (aqicn.org)",
+            "World Air Quality Index Project (aqicn.org) y las agencias de origen de cada estación",
         ],
     }
     ficha.update(overrides)
     return ficha
-
-
 def _numeros_del_texto(texto: str) -> set[str]:
     """Extrae los números del texto, normalizados (sin signo, sin ceros a
     la derecha), para compararlos contra los de la ficha."""
     return {_normalizar_numero(n) for n in re.findall(r"\d+(?:\.\d+)?", texto)}
-
-
 def _numeros_de_la_ficha(ficha: dict) -> set[str]:
     """Todos los números que aparecen en la ficha serializada."""
     return {_normalizar_numero(n) for n in re.findall(r"\d+(?:\.\d+)?", str(ficha))}
-
-
 class TestPlantillaEstadoCiudad(unittest.TestCase):
     def test_incluye_cifras_de_la_ficha(self) -> None:
         texto = plantilla_estado_ciudad(_ficha_estado_ciudad_ejemplo())
         for esperado in ("18.5", "42.0", "Moderada", "Buena", "12"):
             self.assertIn(esperado, texto)
-
     def test_sin_ciudades_devuelve_aviso(self) -> None:
         texto = plantilla_estado_ciudad(_ficha_estado_ciudad_ejemplo(ciudades=[]))
         self.assertIn("No hay datos", texto)
-
     def test_no_inventa_numeros(self) -> None:
         ficha = _ficha_estado_ciudad_ejemplo()
         texto = plantilla_estado_ciudad(ficha)
@@ -184,29 +159,23 @@ class TestPlantillaEstadoCiudad(unittest.TestCase):
             sobrantes,
             msg=f"números en el texto que no están en la ficha: {sobrantes}",
         )
-
-
 class TestPlantillaAuditoriaPronostico(unittest.TestCase):
     def test_incluye_conteos_y_horizonte(self) -> None:
         texto = plantilla_auditoria_pronostico(_ficha_auditoria_ejemplo())
         for esperado in ("100", "40", "30", "20", "10", "3 días"):
             self.assertIn(esperado, texto)
-
     def test_muestra_suficiente_reporta_error(self) -> None:
         texto = plantilla_auditoria_pronostico(_ficha_auditoria_ejemplo())
         self.assertIn("12.34", texto)
         self.assertIn("5 días auditados", texto)
-
     def test_muestra_insuficiente_dice_el_motivo(self) -> None:
         texto = plantilla_auditoria_pronostico(_ficha_auditoria_ejemplo())
         self.assertIn("todavía no hay suficientes días auditados", texto)
         self.assertNotIn("pm25 (horizonte 2 días): error absoluto promedio", texto)
-
     def test_sin_errores_dice_que_no_hay(self) -> None:
         ficha = _ficha_auditoria_ejemplo(errores_por_contaminante_y_horizonte=[])
         texto = plantilla_auditoria_pronostico(ficha)
         self.assertIn("Todavía no hay errores", texto)
-
     def test_no_inventa_numeros(self) -> None:
         ficha = _ficha_auditoria_ejemplo()
         texto = plantilla_auditoria_pronostico(ficha)
@@ -217,20 +186,15 @@ class TestPlantillaAuditoriaPronostico(unittest.TestCase):
             sobrantes,
             msg=f"números en el texto que no están en la ficha: {sobrantes}",
         )
-
-
 # ---------------------------------------------------------------------------
 # Fichas: simulan la base con mock (deterministas, sin datos reales)
 # ---------------------------------------------------------------------------
-
 class TestFichaEstadoCiudad(unittest.TestCase):
     """Los tests simulan `_lecturas_recientes` con `mock.patch`. Así no
     dependen de que la base tenga o no datos reales."""
-
     def _ficha_con_filas(self, filas, alcance="Bogotá"):
         with patch("services.reportes._lecturas_recientes", return_value=filas):
             return construir_ficha_estado_ciudad(None, alcance, ahora=HOY_FIJO)
-
     def test_agrupa_por_ciudad_y_categoriza(self) -> None:
         filas = [
             _fila(1, "aqicn", "Usaquén, Bogotá, Colombia", "pm25", 75.0, "AQI", HOY_FIJO),
@@ -249,7 +213,6 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         self.assertAlmostEqual(conts["pm25"]["valor"], 80.0, places=3)
         self.assertEqual(conts["pm25"]["categoria_aqi"], "Moderada")
         self.assertEqual(conts["pm25"]["n_estaciones"], 2)
-
     def test_global_incluye_varias_ciudades(self) -> None:
         filas = [
             _fila(1, "aqicn", "Bogotá, Colombia", "pm25", 50.0, "AQI", HOY_FIJO),
@@ -258,18 +221,15 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         ficha = self._ficha_con_filas(filas, alcance=CIUDAD_GLOBAL)
         nombres = {c["nombre"] for c in ficha["ciudades"]}
         self.assertEqual(nombres, {"Bogotá", "Medellín"})
-
     def test_ciudad_desconocida_no_aparece(self) -> None:
         # Nombre que no matchea ninguna ciudad conocida: se descarta.
         filas = [_fila(1, "aqicn", "Random Station", "pm25", 50.0, "AQI", HOY_FIJO)]
         ficha = self._ficha_con_filas(filas, alcance=CIUDAD_GLOBAL)
         self.assertEqual(ficha["ciudades"], [])
-
     def test_alcance_ciudad_inexistente_devuelve_vacio(self) -> None:
         filas = [_fila(1, "aqicn", "Bogotá, Colombia", "pm25", 50.0, "AQI", HOY_FIJO)]
         ficha = self._ficha_con_filas(filas, alcance="Cali")
         self.assertEqual(ficha["ciudades"], [])
-
     def test_ultima_lectura_por_estacion(self) -> None:
         # Dos lecturas de la MISMA estación: solo cuenta la más reciente.
         mas_vieja = HOY_FIJO - timedelta(hours=3)
@@ -283,7 +243,6 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         conts = {c["contaminante"]: c for c in ciudad["contaminantes"]}
         self.assertEqual(conts["pm25"]["n_estaciones"], 1)
         self.assertAlmostEqual(conts["pm25"]["valor"], 90.0, places=3)
-
     def test_unidades_distintas_mismo_contaminante_no_se_mezclan(self) -> None:
         # AQICN mide pm25 en AQI; OpenAQ en µg/m³. Se agrupan por separado.
         filas = [
@@ -294,11 +253,25 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         ciudad = ficha["ciudades"][0]
         unidades = {c["unidad"] for c in ciudad["contaminantes"]}
         self.assertEqual(unidades, {"AQI", "µg/m³"})
-
-
+    def test_atribucion_aqicn_aparece_cuando_aporta_datos(self) -> None:
+        """Bloque 4.5: la atribución completa de AQICN aparece cuando la
+        fuente aporta datos, y no aparece cuando no aporta."""
+        con_aqicn = [
+            _fila(1, "aqicn", "Bogotá, Colombia", "pm25", 75.0, "AQI", HOY_FIJO),
+        ]
+        ficha_con = self._ficha_con_filas(con_aqicn)
+        texto_con = " ".join(ficha_con["atribuciones"])
+        self.assertIn("World Air Quality Index Project", texto_con)
+        self.assertIn("aqicn.org", texto_con)
+        self.assertIn("agencias de origen", texto_con)
+        sin_aqicn = [
+            _fila(2, "openaq", "Bogotá, Colombia", "pm25", 18.5, "µg/m³", HOY_FIJO),
+        ]
+        ficha_sin = self._ficha_con_filas(sin_aqicn)
+        texto_sin = " ".join(ficha_sin["atribuciones"])
+        self.assertNotIn("World Air Quality Index Project", texto_sin)
 class TestFichaAuditoria(unittest.TestCase):
     """Los tests simulan las dos consultas de la ficha con mock.patch."""
-
     def _ficha(
         self,
         *,
@@ -316,7 +289,6 @@ class TestFichaAuditoria(unittest.TestCase):
              patch("services.reportes._errores_por_contaminante_y_horizonte",
                    return_value=errores):
             return construir_ficha_auditoria_pronostico(None, ahora=HOY_FIJO)
-
     def test_mes_y_conteos(self) -> None:
         ficha = self._ficha(
             conteos={
@@ -333,7 +305,6 @@ class TestFichaAuditoria(unittest.TestCase):
         self.assertEqual(
             ficha["contaminantes_no_auditables"], ["o3", "no2", "so2", "co"]
         )
-
     def test_muestra_insuficiente_no_expone_error(self) -> None:
         errores = [{
             "contaminante": "pm25", "horizonte": 2, "dias_auditados": 1,
@@ -343,7 +314,6 @@ class TestFichaAuditoria(unittest.TestCase):
         item = ficha["errores_por_contaminante_y_horizonte"][0]
         self.assertFalse(item["muestra_suficiente"])
         self.assertNotIn("error_abs_promedio", item)
-
     def test_muestra_suficiente_expone_error(self) -> None:
         errores = [{
             "contaminante": "aqi", "horizonte": 1, "dias_auditados": 5,
@@ -354,7 +324,6 @@ class TestFichaAuditoria(unittest.TestCase):
         item = ficha["errores_por_contaminante_y_horizonte"][0]
         self.assertTrue(item["muestra_suficiente"])
         self.assertEqual(item["error_abs_promedio"], 12.34)
-
     def test_atribuciones_incluyen_fuente_real(self) -> None:
         """La ficha debe atribuir tanto a Open-Meteo (fuente del pronóstico)
         como a AQICN (fuente de las lecturas reales contra las que se compara,
@@ -362,9 +331,7 @@ class TestFichaAuditoria(unittest.TestCase):
         ficha = self._ficha()
         atribuciones_texto = " ".join(ficha["atribuciones"])
         self.assertIn("Copernicus Atmosphere Monitoring Service (CAMS)", atribuciones_texto)
-        self.assertIn("AQICN", atribuciones_texto)
+        self.assertIn("World Air Quality Index Project", atribuciones_texto)
         self.assertEqual(len(ficha["atribuciones"]), 2)
-
-
 if __name__ == "__main__":
     unittest.main()

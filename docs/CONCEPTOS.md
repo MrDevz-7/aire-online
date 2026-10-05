@@ -97,9 +97,13 @@ Investigación con tope de 1 página oficial por fuente (D47/regla j), hecha el 
 - Términos: **CONFIRMADO**. La API de licencias expone por fuente los campos `commercialUseAllowed`, `attributionRequired`, `shareAlikeRequired`, `modificationAllowed`, `redistributionAllowed`. Ejemplo documentado: CC BY 4.0. Uso no comercial permitido; redistribución permitida; modificación/derivados permitidos; atribución **obligatoria**.
 
 ### AQICN / WAQI
-- URL: https://aqicn.org/ (2026-10-04; /terms/ devuelve 404, /api/ no expone la licencia).
-- Atribución sugerida: "Datos de AQICN / World Air Quality Index Project (aqicn.org)."
-- Términos: **NO CONFIRMADO** por investigación directa. Se identificaron términos del *data platform* (producto histórico/pago) que sugieren restricciones más amplias que "no comercial" (no cachear/archivar, no publicar rankings ni comparaciones, avisar "datos no validados" en derivados), pero **no se pudo confirmar si aplican a la API en tiempo real** (`api.waqi.info`), que es lo que el proyecto usa. La home acredita a CAMS, MaxMind, GeoNames y OpenStreetMap como componentes del sitio. La persona aportó información adicional (sin URL de fuente): "API básica libre para uso no comercial, educativo y de desarrollo". ⚠ Hallazgo para el PM (ver abajo).
+- URL: https://aqicn.org/api/tos/ (consultada el 2026-10-04; el sitio puede cambiarla sin aviso).
+- Atribución obligatoria (por los términos): **World Air Quality Index Project** (aqicn.org) **y la agencia (EPA) de origen de cada estación**.
+- Términos (resumen parafraseado, no copiado textualmente):
+  - API gratuita, con token obligatorio, sujeta a cuota (~1.000 solicitudes por minuto).
+  - **Datos:** no se pueden vender ni incluir en paquetes que se vendan; no se pueden usar en aplicaciones o servicios de pago; **no se pueden redistribuir como datos cacheados o archivados**. El histórico es un producto aparte (su "data platform").
+  - **Aplicaciones:** atribución obligatoria al **World Air Quality Index Project y a la agencia (EPA) de origen**; el uso público por organizaciones sin fines de lucro requiere **notificación previa por email** al equipo de WAQI; por empresas con fines de lucro, un acuerdo explícito.
+- **Pendiente de decisión del proyecto:** qué datos de AQICN se exponen públicamente y si se notifica a WAQI. No es una decisión de M6 (M6 solo documenta y ajusta el texto de atribución de las fichas); afecta el diseño de M7+ y los textos de M11/M14.
 
 ### IBOCA (Red de Monitoreo de Calidad del Aire de Bogotá)
 - URL: https://oab.ambientebogota.gov.co/terminos-y-condiciones-de-uso/ (2026-10-04, enlazada desde el footer del Observatorio Ambiental de Bogotá).
@@ -120,7 +124,7 @@ Investigación con tope de 1 página oficial por fuente (D47/regla j), hecha el 
 
 Tres hallazgos que **no se resuelven en este módulo** (reglas g y j del prompt):
 
-1. **AQICN / WAQI**: los términos del *data platform* sugieren restricciones más amplias que "no comercial" (no cachear/archivar, no publicar rankings o comparaciones, avisar "no validado" en todo derivado). No se pudo confirmar si esos términos cubren la API en tiempo real que usa el proyecto. Si el PM decide acotar o suspender la ingestión de AQICN hasta aclarar, ese cambio es de M5 (qué fuentes se ingieren), no de M6.
+1. **AQICN / WAQI (documentado en M6 Bloque 4.5):** los términos oficiales de la API se leyeron y quedaron parafraseados en la subsección de AQICN, arriba. **Pendiente de decisión del proyecto:** qué datos de AQICN se exponen públicamente y si se notifica a WAQI por email. Es una decisión de alcance para M7+ (qué endpoints públicos sirven datos de AQICN), no bloquea M6. La persona ya tiene las opciones sobre la mesa; esta instancia no decide.
 
 2. **SIATA**: el portal de datos abiertos del AMVA devolvió 502 durante toda la investigación. Sin licencia pública verificada.
 

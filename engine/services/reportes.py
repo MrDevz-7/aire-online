@@ -9,30 +9,24 @@ Dos tipos de ficha: `estado_ciudad` (estado actual por ciudad) y
 pronóstico de Open-Meteo).
 """
 from __future__ import annotations
-
 import hashlib
 import json
 import statistics
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
 from database.config import settings
 from database.models import AuditoriaPronostico, Estacion, Lectura, Pronostico
 from services.aqi_escala import categoria_aqi, convertir_a_aqi
 from sources.tipos import VENTANA_ACTIVIDAD_DIAS
-
 OFFSET_COLOMBIA = timezone(timedelta(hours=-5))
 CIUDAD_GLOBAL = "global"
-
 # Fuentes regionales de una sola ciudad/zona.
 _CIUDAD_POR_FUENTE: dict[str, str] = {
     "iboca": "Bogotá",
     "siata": "Medellín",
 }
-
 # Ciudades conocidas para inferir por nombre (variantes sin tilde incluidas).
 _CIUDADES_CONOCIDAS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Bogotá", ("bogotá", "bogota")),
@@ -44,10 +38,14 @@ _CIUDADES_CONOCIDAS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Pereira", ("pereira",)),
     ("Manizales", ("manizales",)),
 )
-
 _ATRIBUCIONES: dict[str, str] = {
     "openaq": "OpenAQ (openaq.org)",
-    "aqicn": "AQICN/WAQI (aqicn.org)",
+    # AQICN exige atribuir al agregador Y a la agencia de origen de cada
+    # estación. Ver docs/CONCEPTOS.md, "Atribuciones de fuentes de datos".
+    "aqicn": (
+        "World Air Quality Index Project (aqicn.org) y las agencias "
+        "de origen de cada estación"
+    ),
     "iboca": "Red de Monitoreo de Calidad del Aire de Bogotá (IBOCA)",
     "siata": "SIATA — Área Metropolitana del Valle de Aburrá",
     "open-meteo": (
@@ -55,19 +53,12 @@ _ATRIBUCIONES: dict[str, str] = {
         "Air Quality API (open-meteo.com). Uso no comercial"
     ),
 }
-
 _CONTAMINANTES_AUDITADOS: tuple[str, ...] = ("aqi", "pm25", "pm10")
 _CONTAMINANTES_NO_AUDITABLES: tuple[str, ...] = ("o3", "no2", "so2", "co")
-
-
 def _fecha_local(ahora: datetime) -> date:
     return ahora.astimezone(OFFSET_COLOMBIA).date()
-
-
 def _mes_local(ahora: datetime) -> str:
     return ahora.astimezone(OFFSET_COLOMBIA).strftime("%Y-%m")
-
-
 def _ciudad_de(fuente: str, nombre: str) -> Optional[str]:
     """Ciudad inferida de una estación, o None si no se puede inferir."""
     directa = _CIUDAD_POR_FUENTE.get(fuente)
@@ -78,8 +69,6 @@ def _ciudad_de(fuente: str, nombre: str) -> Optional[str]:
         if any(v in bajo for v in variantes):
             return ciudad
     return None
-
-
 def hash_canonico(ficha: dict[str, Any]) -> str:
     """sha256 del JSON canónico (claves ordenadas, sin espacios).
     Estable ante reordenamiento de claves."""
@@ -87,12 +76,9 @@ def hash_canonico(ficha: dict[str, Any]) -> str:
         ficha, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     )
     return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
-
-
 # ---------------------------------------------------------------------------
 # Ficha: estado_ciudad
 # ---------------------------------------------------------------------------
-
 def _lecturas_recientes(db: Session, ahora: datetime) -> list[Any]:
     """Lecturas de estaciones activas dentro de la ventana D31."""
     desde = ahora - timedelta(days=VENTANA_ACTIVIDAD_DIAS)
@@ -104,8 +90,6 @@ def _lecturas_recientes(db: Session, ahora: datetime) -> list[Any]:
         .join(Lectura, Lectura.estacion_id == Estacion.id)
         .where(Estacion.activa.is_(True), Lectura.medido_en >= desde)
     ).all()
-
-
 def _agrupar_por_ciudad(filas: list[Any]) -> dict[str, dict[str, Any]]:
     """Agrupa por ciudad y, dentro, por (contaminante, unidad). Por estación
     se conserva la última lectura de cada (contaminante, unidad)."""
@@ -133,8 +117,6 @@ def _agrupar_por_ciudad(filas: list[Any]) -> dict[str, dict[str, Any]]:
         if ultimo is None or fila.medido_en > ultimo:
             bucket["ultimo_medido_en"] = fila.medido_en
     return por_ciudad
-
-
 def _categoria_para(contaminante: str, valor: float, unidad: str) -> Optional[str]:
     """Categoría AQI cualitativa, si se puede derivar del valor."""
     if unidad.strip().lower() == "aqi" or contaminante == "aqi":
@@ -145,16 +127,10 @@ def _categoria_para(contaminante: str, valor: float, unidad: str) -> Optional[st
             return None
         return categoria_aqi(convertido)
     return None
-
-
 def _formato_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _formato_local(dt: datetime) -> str:
     return dt.astimezone(OFFSET_COLOMBIA).strftime("%Y-%m-%d %H:%M -05")
-
-
 def construir_ficha_estado_ciudad(
     db: Session, alcance: str, *, ahora: Optional[datetime] = None
 ) -> dict[str, Any]:
@@ -166,7 +142,6 @@ def construir_ficha_estado_ciudad(
     por_ciudad = _agrupar_por_ciudad(filas)
     if alcance != CIUDAD_GLOBAL:
         por_ciudad = {alcance: por_ciudad[alcance]} if alcance in por_ciudad else {}
-
     ciudades_ficha: list[dict[str, Any]] = []
     fuentes_totales: set[str] = set()
     for ciudad_nombre in sorted(por_ciudad.keys()):
@@ -196,7 +171,6 @@ def construir_ficha_estado_ciudad(
             "dato_mas_reciente_utc": _formato_utc(ultimo) if ultimo else None,
             "dato_mas_reciente_local": _formato_local(ultimo) if ultimo else None,
         })
-
     atribuciones = sorted(
         _ATRIBUCIONES[f] for f in fuentes_totales if f in _ATRIBUCIONES
     )
@@ -213,12 +187,9 @@ def construir_ficha_estado_ciudad(
         ],
         "atribuciones": atribuciones,
     }
-
-
 # ---------------------------------------------------------------------------
 # Ficha: auditoria_pronostico
 # ---------------------------------------------------------------------------
-
 def _conteos_auditoria(
     db: Session, *, desde_mes: date, hasta_mes: date
 ) -> dict[str, int]:
@@ -248,8 +219,6 @@ def _conteos_auditoria(
         elif estado == "sin_datos":
             conteos["sin_datos"] += 1
     return conteos
-
-
 def _horizonte_maximo(db: Session) -> int:
     """Máximo `fecha_objetivo - fecha_captura` presente en `pronosticos`."""
     filas = db.execute(
@@ -258,8 +227,6 @@ def _horizonte_maximo(db: Session) -> int:
     if not filas:
         return 0
     return max((f.fecha_objetivo - f.fecha_captura).days for f in filas)
-
-
 def _errores_por_contaminante_y_horizonte(
     db: Session, *, min_dias: int
 ) -> list[dict[str, Any]]:
@@ -292,7 +259,6 @@ def _errores_por_contaminante_y_horizonte(
         bucket["errores"].append(fila.error_abs)
         if fila.sesgo is not None:
             bucket["sesgos"].append(fila.sesgo)
-
     resultado: list[dict[str, Any]] = []
     for (cont, horiz), bucket in sorted(grupos.items()):
         dias = len(bucket["dias"])
@@ -308,8 +274,6 @@ def _errores_por_contaminante_y_horizonte(
                 item["sesgo_promedio"] = round(statistics.mean(bucket["sesgos"]), 3)
         resultado.append(item)
     return resultado
-
-
 def construir_ficha_auditoria_pronostico(
     db: Session, alcance: str = CIUDAD_GLOBAL, *, ahora: Optional[datetime] = None
 ) -> dict[str, Any]:
@@ -323,7 +287,6 @@ def construir_ficha_auditoria_pronostico(
         hasta_mes = date(anio + 1, 1, 1) - timedelta(days=1)
     else:
         hasta_mes = date(anio, num_mes + 1, 1) - timedelta(days=1)
-
     conteos = _conteos_auditoria(db, desde_mes=desde_mes, hasta_mes=hasta_mes)
     horizonte_max = _horizonte_maximo(db)
     errores = _errores_por_contaminante_y_horizonte(
@@ -349,12 +312,9 @@ def construir_ficha_auditoria_pronostico(
         # services/auditoria.py al resolver cada fila). Se atribuyen ambas.
         "atribuciones": [_ATRIBUCIONES["open-meteo"], _ATRIBUCIONES["aqicn"]],
     }
-
-
 # ---------------------------------------------------------------------------
 # Plantillas determinísticas (fallback sin Gemini)
 # ---------------------------------------------------------------------------
-
 def plantilla_estado_ciudad(ficha: dict[str, Any]) -> str:
     """Narra una ficha `estado_ciudad` sin IA. No agrega cifras fuera de la ficha."""
     fecha = ficha["fecha_referencia"]
@@ -392,8 +352,6 @@ def plantilla_estado_ciudad(ficha: dict[str, Any]) -> str:
     if ficha.get("atribuciones"):
         parrafos.append("Fuentes: " + " ".join(ficha["atribuciones"]) + ".")
     return "\n\n".join(parrafos)
-
-
 def plantilla_auditoria_pronostico(ficha: dict[str, Any]) -> str:
     """Narra una ficha `auditoria_pronostico` sin IA. No agrega cifras
     fuera de la ficha y respeta el indicador de muestra insuficiente."""
