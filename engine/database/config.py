@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # = historial completo para todas las fuentes.
     FUENTES_SIN_HISTORICO_PUBLICO: str = ""
 
+    # --- M8: autenticación (D77/D79) ---
+    # Secreto servicio-a-servicio entre engine y gateway. Si está vacío,
+    # las rutas /internal/* quedan abiertas (solo desarrollo local, D44
+    # intacto). En producción (ENVIRONMENT=production) el engine se niega
+    # a arrancar sin él (ver api.main.validar_arranque).
+    INTERNAL_API_TOKEN: str = ""
     # development | production
     ENVIRONMENT: str = "development"
 

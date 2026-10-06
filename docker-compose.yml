@@ -11,6 +11,14 @@
 # Vive en la raíz del monorepo porque la infraestructura es compartida
 # del proyecto, no un detalle interno de /engine ni de /gateway.
 #
+# Variables de entorno (M8):
+#   - Cada servicio lee SU PROPIO .env: `engine/.env` y `gateway/.env`.
+#     Son archivos locales, NO versionados (git los ignora).
+#   - `INTERNAL_API_TOKEN` (D79) DEBE tener el MISMO valor en los dos:
+#     el gateway lo manda, el engine lo exige. Si difieren, todo
+#     `/internal/*` responde 401.
+#   - NO hace falta un .env en la raíz del repo. Compose no lo usa.
+#
 # Uso (desde la raíz del repo):
 #   docker compose up -d --build     # construye y levanta todo
 #   docker compose ps                # estado (los 3 deben decir "healthy")
@@ -20,6 +28,10 @@
 #
 # Migraciones: se corren aparte, una sola vez (o cuando cambien):
 #   docker compose run --rm engine alembic upgrade head
+#
+# Lección M7: `docker compose restart` NO recarga env_file. Si cambiás
+# una variable en `.env`, usá:
+#   docker compose up -d --force-recreate <servicio>
 name: aire_online
 
 services:
@@ -60,9 +72,8 @@ services:
     container_name: aire_online_engine
     restart: unless-stopped
     # env_file lee las variables del .env del engine (que NO se commitea).
-    # Ahí viven OPENAQ_API_KEY, AQICN_TOKEN, GEMINI_API_KEYS, etc.
-    # Si el archivo no existe, Compose avisa pero igual arranca; las
-    # variables faltantes toman su default del código (Settings()).
+    # Ahí viven OPENAQ_API_KEY, AQICN_TOKEN, GEMINI_API_KEYS, y desde M8
+    # también INTERNAL_API_TOKEN.
     env_file:
       - ./engine/.env
     environment:
@@ -72,7 +83,14 @@ services:
       # La interpolación ${POSTGRES_PASSWORD:-...} usa el mismo default
       # que el servicio postgres, así no se pueden desincronizar.
       DATABASE_URL: postgresql+psycopg2://aire_online:${POSTGRES_PASSWORD:-aire_online_dev}@postgres:5432/aire_online
+      # OJO: en producción esto tiene que ser "production" (el engine no
+      # arranca sin INTERNAL_API_TOKEN — D79). En Compose de desarrollo
+      # queda en "development" para que /internal/* siga abiertas si
+      # alguien no configuró el token (flujo manual de D44).
       ENVIRONMENT: development
+      # NOTA M8: INTERNAL_API_TOKEN NO va acá. Viene del env_file de
+      # arriba (`engine/.env`), junto con el resto de las variables del
+      # engine. Declararlo también acá pisaría el del env_file.
     ports:
       # Solo 127.0.0.1: la persona sigue llamando /internal/* directo
       # al engine desde su PC (D44), pero el puerto no queda expuesto a
@@ -109,6 +127,12 @@ services:
       dockerfile: Dockerfile
     container_name: aire_online_gateway
     restart: unless-stopped
+    # M8: el gateway ahora tiene su propio .env (que NO se commitea),
+    # con JWT_SECRET, INTERNAL_API_TOKEN, etc. Antes de M8, todas las
+    # variables iban inline acá abajo; ahora van al env_file y solo
+    # quedan acá los overrides específicos del entorno Compose.
+    env_file:
+      - ./gateway/.env
     environment:
       # NODE_ENV=production: el Dockerfile del gateway ya lo setea en la
       # etapa de runtime, pero lo repetimos acá para que el compose sea
@@ -116,15 +140,16 @@ services:
       NODE_ENV: production
       PORT: 4000
       # Origen del frontend permitido por CORS. Hoy es el Next.js local.
-      # El código del gateway usa CORS_ORIGINS (plural, lista separada por
-      # coma); en Bloque 4 se agregan ENGINE_URL y ENGINE_TIMEOUT_MS.
       CORS_ORIGINS: http://localhost:3000
       # URL del engine por la red interna de Compose (nombre de servicio,
       # NO localhost). La usará el cliente HTTP del Bloque 4.
       ENGINE_URL: http://engine:8000
-      # Timeout del cliente del engine. El código del Bloque 4 lo leerá;
-      # en Bloque 3 queda como valor por defecto listo para usar.
+      # Timeout del cliente del engine.
       ENGINE_TIMEOUT_MS: "8000"
+      # NOTA M8: JWT_SECRET, INTERNAL_API_TOKEN, REFRESH_TTL_S,
+      # JWT_ACCESS_TTL_S, COOKIE_SAMESITE y ADMIN_TIMEOUT_MS vienen del
+      # env_file (`gateway/.env`), NO van acá. Si los pusieras acá
+      # pisarían los del env_file.
     ports:
       # El gateway SÍ se publica al host sin restricción de IP: es la
       # puerta de entrada pública (el frontend y cualquier consumidor

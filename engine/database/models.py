@@ -407,3 +407,64 @@ class Reporte(Base):
             f"<Reporte id={self.id} tipo={self.tipo!r} alcance={self.alcance!r} "
             f"fecha={self.fecha_referencia} origen={self.origen_texto!r}>"
         )
+
+    # --------------------------------------------------------------------------
+# M8: autenticación (usuarios y sesiones de refresco).
+# --------------------------------------------------------------------------
+# D77: por ahora solo `admin`. La columna existe para poder sumar roles
+# más adelante con una migración aditiva (VARCHAR + CHECK, D12/D13).
+ROLES_USUARIO: tuple[str, ...] = ("admin",)
+
+
+class Usuario(Base):
+    """Cuenta administrativa (D77).
+
+    No hay usuarios finales ni registro público: las cuentas las crea
+    solo el dueño con el script `crear-admin` del gateway (D78). El
+    engine guarda el `password_hash` ya calculado como cadena opaca y
+    nunca ve ni registra una contraseña en claro.
+    """
+    __tablename__ = "usuarios"
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_usuarios_email"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255))
+    password_hash: Mapped[str] = mapped_column(String(255))
+    rol: Mapped[str] = mapped_column(
+        _enum(ROLES_USUARIO, "ck_usuarios_rol"), default="admin"
+    )
+    activo: Mapped[bool] = mapped_column(Boolean, default=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ultimo_login_en: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class SesionRefresh(Base):
+    """Refresh token de una sesión (D77).
+
+    Se guarda el SHA-256 del token, nunca el token. `reemplazada_por`
+    apunta a la sesión que la reemplazó en una rotación, para poder
+    detectar reuso de un token ya rotado (señal de robo) y revocar las
+    sesiones activas del usuario.
+    """
+    __tablename__ = "sesiones_refresh"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_sesiones_refresh_token_hash"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey("usuarios.id", ondelete="CASCADE")
+    )
+    token_hash: Mapped[str] = mapped_column(String(64))
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expira_en: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revocada_en: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # FK a sí misma: la sesión que reemplazó a esta en una rotación.
+    # ON DELETE SET NULL para no arrastrar borrados en cascada raros.
+    reemplazada_por: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("sesiones_refresh.id", ondelete="SET NULL"), nullable=True
+    )

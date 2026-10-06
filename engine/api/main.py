@@ -1,9 +1,7 @@
 """
 App principal de FastAPI (engine de AirE_Online).
-
 Se corre con: python -m uvicorn api.main:app --reload --port 8000
 (desde la carpeta engine/, con el venv activado)
-
 Expone /api/health, los endpoints internos de ingestión manual (M3:
 OpenAQ, AQICN; M4: IBOCA, SIATA), los de reconciliación (M5a), el de
 auditoría de pronóstico (M5b) y el de captura de pronósticos de
@@ -13,10 +11,14 @@ reporte persistido (`GET /api/reportes/{tipo}`). Desde M7 expone el
 contrato de lectura completo bajo `/api/*` (D45, D75): estaciones,
 lecturas, atribuciones (Bloque 1), estado, alertas y auditoría/resumen
 (Bloque 2).
+Desde M8 agrega autenticación: usuarios y sesiones de refresco (D77), y
+un middleware que exige `X-Internal-Token` en `/internal/*` cuando la
+variable `INTERNAL_API_TOKEN` no está vacía (D79).
 """
 import asyncio
 import logging
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -25,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from api.middleware import InternalTokenMiddleware
 from api.schemas import (
     AlertasListResponse,
     AtribucionesResponse,
@@ -40,6 +43,15 @@ from api.schemas import (
     ResumenEmparejamientoResponse,
     ResumenGeneracionResponse,
     ResumenIngestionResponse,
+    SesionCreate,
+    SesionOut,
+    SesionRevocar,
+    SesionRevocarOut,
+    SesionRotar,
+    SesionRotarOut,
+    UsuarioConHash,
+    UsuarioCreate,
+    UsuarioOut,
 )
 from database.config import settings
 from database.models import Reporte
@@ -68,6 +80,23 @@ from services.reportes import (
     construir_ficha_estado_ciudad,
     generar_reportes,
 )
+from services.sesiones import (
+    SesionInvalida,
+    SesionNoEncontrada,
+    TokenReusado,
+    UsuarioNoExiste,
+    crear_sesion,
+    revocar_sesion,
+    rotar_sesion,
+)
+from services.usuarios import (
+    EmailYaExiste,
+    RolInvalido,
+    buscar_por_email,
+    buscar_por_id,
+    crear_usuario,
+    registrar_login,
+)
 from sources.aqicn import AQICNConfigError, AQICNError
 from sources.iboca import IBOCAError
 from sources.open_meteo import OpenMeteoConfigError, OpenMeteoError
@@ -82,10 +111,34 @@ if sys.platform == "win32":
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def validar_arranque(environment: str, internal_token: str) -> None:
+    """D79: en producción, sin INTERNAL_API_TOKEN, el engine no arranca.
+
+    Función pura a propósito: se puede testear sin arrancar el proceso.
+    Se llama desde el lifespan de la app (ver más abajo).
+    """
+    if environment.strip().lower() == "production" and not internal_token.strip():
+        raise RuntimeError(
+            "INTERNAL_API_TOKEN es obligatorio en producción (D79). "
+            "Definilo en engine/.env o en las variables del contenedor."
+        )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Arranque: valida la configuración obligatoria antes de aceptar
+    tráfico. Si `ENVIRONMENT=production` y `INTERNAL_API_TOKEN` está
+    vacío, la app no arranca (uvicorn sale con código distinto de 0)."""
+    validar_arranque(settings.ENVIRONMENT, settings.INTERNAL_API_TOKEN)
+    yield
+
+
 app = FastAPI(
     title="AirE_Online Engine API",
     description="Reconciliación y auditoría de calidad del aire para Colombia.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # CORS: qué orígenes de navegador pueden llamar a esta API. Hoy solo el
@@ -117,6 +170,20 @@ class ForceUTF8JSONMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(ForceUTF8JSONMiddleware)
+
+# M8 (D79): token servicio-a-servicio para /internal/*. Si la variable
+# está vacía, el middleware deja pasar (desarrollo local: el flujo
+# manual de D44 sigue intacto). En producción el lifespan de arriba se
+# niega a arrancar sin token.
+#
+# ORDEN: Starlette PREPENDE cada middleware nuevo, así que el último
+# agregado queda como el MÁS EXTERNO. Se agrega DESPUÉS de CORS y
+# ForceUTF8 a propósito: el chequeo del token corre antes que la lógica
+# de negocio y antes de construir el cuerpo de la respuesta.
+app.add_middleware(
+    InternalTokenMiddleware,
+    token_esperado=settings.INTERNAL_API_TOKEN,
+)
 
 
 @app.get("/api/health", response_model=HealthResponse)
@@ -154,7 +221,6 @@ def ingest_openaq(db: Session = Depends(get_db)) -> dict:
 @app.post("/internal/ingest/aqicn", response_model=ResumenIngestionResponse, tags=["internal"])
 def ingest_aqicn(db: Session = Depends(get_db)) -> dict:
     """Descarga AQICN (Colombia) y la escribe en la base. Devuelve un resumen.
-
     Tarda decenas de segundos: el descubrimiento por cuadrantes hace ~90
     requests y luego se pide el detalle de cada estación.
     """
@@ -169,7 +235,6 @@ def ingest_aqicn(db: Session = Depends(get_db)) -> dict:
 @app.post("/internal/ingest/iboca", response_model=ResumenIngestionResponse, tags=["internal"])
 def ingest_iboca(db: Session = Depends(get_db)) -> dict:
     """Descarga IBOCA (Bogotá) y la escribe en la base. Devuelve un resumen.
-
     IBOCA no requiere clave. El cliente devuelve un ResultadoDescarga
     vacío con `abortada` si el servicio falla; ese caso NO lanza
     excepción, así que la respuesta es 200 con el motivo en `abortada`.
@@ -208,7 +273,6 @@ def ingest_siata(db: Session = Depends(get_db)) -> dict:
 def reconciliacion_emparejar(db: Session = Depends(get_db)) -> dict:
     """Calcula (o actualiza) los emparejamientos entre estaciones activas
     de fuentes distintas dentro de RADIO_EMPAREJAMIENTO_KM.
-
     Ver services/reconciliacion.py.
     """
     return calcular_emparejamientos(db).a_dict()
@@ -230,7 +294,6 @@ def reconciliacion_comparar(db: Session = Depends(get_db)) -> dict:
 @app.post("/internal/audit/run", response_model=ResumenAuditoriaResponse, tags=["internal"])
 def audit_run(db: Session = Depends(get_db)) -> dict:
     """Resuelve las auditorías pendientes cuyo día objetivo ya terminó.
-
     'Ya terminó' se mide en hora local Colombia. Si el día todavía no
     terminó, la auditoría se deja como `pendiente` (no se calcula con
     datos parciales). Idempotente: la segunda corrida seguida no hace
@@ -247,7 +310,6 @@ def audit_run(db: Session = Depends(get_db)) -> dict:
 def pronosticos_capturar(db: Session = Depends(get_db)) -> dict:
     """Captura pronósticos de Open-Meteo para las estaciones AQICN activas
     con lecturas recientes (D62).
-
     Idempotente: `ON CONFLICT DO NOTHING` sobre el UNIQUE de `pronosticos`.
     La PRIMERA captura del día gana; una segunda corrida el mismo día
     devuelve `pronosticos_insertados: 0` y `pronosticos_ya_existian: N`.
@@ -282,7 +344,6 @@ def reportes_generar(
     db: Session = Depends(get_db),
 ) -> dict:
     """Genera reportes en lenguaje natural (M6).
-
     - `tipo`: `estado_ciudad` o `auditoria_pronostico`. Si se omite, genera
       para ambos.
     - `alcance`: ciudad (por ejemplo "Bogotá"), "global", o una lista de
@@ -291,7 +352,6 @@ def reportes_generar(
     - `forzar_plantilla=true`: usa la plantilla determinística sin llamar
       a Gemini (`motivo_fallback='forzado'`). Útil para probar sin gastar
       cuota.
-
     Devuelve un resumen: totales, nuevos, reutilizados (por caché de
     hash), y el desglose por origen y por motivo de fallback.
     """
@@ -310,7 +370,6 @@ def reportes_get(
     db: Session = Depends(get_db),
 ) -> dict:
     """Devuelve el último reporte persistido del `tipo` indicado.
-
     Si `alcance` viene especificado, filtra por él. Si no, devuelve el más
     reciente de cualquier alcance. 404 si no hay ninguno. **Nunca llama a
     Gemini**: sirve lo ya persistido (D70).
@@ -355,7 +414,6 @@ def api_estaciones(
     db: Session = Depends(get_db),
 ) -> dict:
     """Estaciones registradas (D75.1).
-
     Filtros opcionales: `ciudad` (nombre tal cual figura en `nombre` o
     inferido de la fuente; sin acentos), `fuente`, `activa`. Paginado con
     `limit` (default 100, máximo 500) y `offset`. Respuesta:
@@ -381,7 +439,6 @@ def api_estaciones_lecturas(
     db: Session = Depends(get_db),
 ) -> dict:
     """Lecturas de una estación (D75.2).
-
     `desde`/`hasta` son ISO 8601 en UTC (ej. `2026-10-03T00:00:00Z`).
     `contaminante` filtra por `pm25`, `pm10`, `o3`, `no2`, `so2`, `co` o
     `aqi`. 404 si la estación no existe. Respeta el interruptor D74.
@@ -403,7 +460,6 @@ def api_estaciones_lecturas(
 @app.get("/api/atribuciones", response_model=AtribucionesResponse, tags=["api"])
 def api_atribuciones() -> dict:
     """Atribuciones y estado de confirmación por fuente (D75.6).
-
     El texto de atribución es el mismo que usan las fichas de M6: no se
     duplica acá. Estático (no toca la base).
     """
@@ -424,7 +480,6 @@ def api_estado(
     db: Session = Depends(get_db),
 ) -> dict:
     """Estado actual reconciliado por ciudad (D75.3).
-
     Filtro opcional `ciudad`. Si se omite, devuelve `alcance="global"`
     (todas las ciudades con datos en la ventana de actividad). Reutiliza
     el constructor de ficha de M6: **no llama a Gemini, no escribe en la
@@ -444,7 +499,6 @@ def api_alertas(
     db: Session = Depends(get_db),
 ) -> dict:
     """Alertas abiertas (D75.4).
-
     Filtros opcionales: `tipo` (`umbral_aqi` | `discrepancia_fuentes`),
     `ciudad` (inferida de la estación asociada; se compara sin acentos).
     Solo lectura: no crea ni modifica alertas, y excluye las ya
@@ -465,7 +519,6 @@ def api_auditoria_resumen(
     db: Session = Depends(get_db),
 ) -> dict:
     """Resumen de auditoría del pronóstico (D75.5).
-
     `mes` en formato `YYYY-MM`; si se omite, el mes en curso en hora local
     Colombia. Reutiliza el constructor de ficha de M6: **no llama a
     Gemini, no escribe en la base**.
@@ -477,3 +530,173 @@ def api_auditoria_resumen(
                 status_code=400, detail="mes debe ser 'YYYY-MM' (ej. 2026-09)"
             )
     return construir_ficha_auditoria_pronostico(db, mes=mes)
+
+
+# ---------------------------------------------------------------------------
+# M8: autenticación interna (D77, D79).
+# El engine es dueño de los DATOS de auth; el gateway es dueño de la
+# criptografía. Estos endpoints solo los llama el gateway (van bajo
+# /internal/ y los cubre el middleware del token).
+# ---------------------------------------------------------------------------
+def _usuario_a_dict(u) -> dict:
+    """Serializa un Usuario SIN password_hash (la forma pública)."""
+    return {
+        "id": u.id,
+        "email": u.email,
+        "rol": u.rol,
+        "activo": u.activo,
+        "creado_en": u.creado_en,
+        "ultimo_login_en": u.ultimo_login_en,
+    }
+
+
+def _usuario_con_hash_a_dict(u) -> dict:
+    """Igual que `_usuario_a_dict` pero con password_hash. Solo lo usa
+    `por-email`: es la única ruta del engine que devuelve el hash."""
+    d = _usuario_a_dict(u)
+    d["password_hash"] = u.password_hash
+    return d
+
+
+def _sesion_a_dict(s) -> dict:
+    """Sesión serializada. NUNCA lleva el token en claro ni su hash."""
+    return {
+        "id": s.id,
+        "usuario_id": s.usuario_id,
+        "creado_en": s.creado_en,
+        "expira_en": s.expira_en,
+    }
+
+
+@app.post("/internal/usuarios", response_model=UsuarioOut, tags=["internal"])
+def internal_usuarios_crear(
+    body: UsuarioCreate, db: Session = Depends(get_db)
+) -> dict:
+    """Crea un usuario (D77). Solo lo llama el gateway, desde el script
+    `crear-admin` (D78). No hay ruta pública que cree cuentas: ninguna
+    ruta de `/api/*` llama a este endpoint."""
+    try:
+        u = crear_usuario(
+            db,
+            email=body.email,
+            password_hash=body.password_hash,
+            rol=body.rol,
+            activo=True,
+        )
+    except EmailYaExiste as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except RolInvalido as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return _usuario_a_dict(u)
+
+
+# OJO CON EL ORDEN: `/por-email` se registra ANTES de `/{usuario_id}`
+# para que "por-email" no intente coercionarse a int como id.
+@app.get(
+    "/internal/usuarios/por-email",
+    response_model=UsuarioConHash,
+    tags=["internal"],
+)
+def internal_usuarios_por_email(
+    email: str, db: Session = Depends(get_db)
+) -> dict:
+    """Busca por email. Es la ÚNICA ruta que devuelve `password_hash`: lo
+    necesita el gateway para verificar el login. El gateway nunca lo
+    reenvía ni lo loguea."""
+    u = buscar_por_email(db, email)
+    if u is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return _usuario_con_hash_a_dict(u)
+
+
+@app.get(
+    "/internal/usuarios/{usuario_id}",
+    response_model=UsuarioOut,
+    tags=["internal"],
+)
+def internal_usuarios_por_id(
+    usuario_id: int, db: Session = Depends(get_db)
+) -> dict:
+    u = buscar_por_id(db, usuario_id)
+    if u is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return _usuario_a_dict(u)
+
+
+@app.post("/internal/sesiones", response_model=SesionOut, tags=["internal"])
+def internal_sesiones_crear(
+    body: SesionCreate, db: Session = Depends(get_db)
+) -> dict:
+    """Crea una sesión de refresco. El gateway manda el SHA-256 del token
+    (el engine nunca ve el token en claro). Si `registrar_login=True`
+    (default), además actualiza `ultimo_login_en` del usuario: esto es
+    intencional, porque este endpoint se llama solo en el login real;
+    las rotaciones usan `/internal/sesiones/rotar`."""
+    try:
+        s = crear_sesion(
+            db,
+            usuario_id=body.usuario_id,
+            token_hash=body.token_hash,
+            expira_en=body.expira_en,
+        )
+    except UsuarioNoExiste as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if body.registrar_login:
+        registrar_login(db, body.usuario_id)
+    return _sesion_a_dict(s)
+
+
+@app.post(
+    "/internal/sesiones/rotar",
+    response_model=SesionRotarOut,
+    tags=["internal"],
+)
+def internal_sesiones_rotar(
+    body: SesionRotar, db: Session = Depends(get_db)
+) -> dict:
+    """Rotación atómica (D77).
+
+    Rechaza tokens vencidos o revocados. Si el token presentado ya había
+    sido rotado, se revocan TODAS las sesiones activas del usuario
+    (señal de robo) y se rechaza con 401.
+    """
+    try:
+        usuario, sesion = rotar_sesion(
+            db,
+            token_hash_actual=body.token_hash_actual,
+            token_hash_nuevo=body.token_hash_nuevo,
+            expira_en_nuevo=body.expira_en_nuevo,
+        )
+    except (SesionNoEncontrada, TokenReusado, SesionInvalida) as exc:
+        # Todas las fallas de auth se reportan igual al gateway: 401. La
+        # distinción entre "no existe", "vencida" y "reusada" queda en el
+        # log del engine, no en la respuesta: no hay que darle pistas a
+        # quien no tiene el token.
+        raise HTTPException(status_code=401, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {
+        "usuario": _usuario_a_dict(usuario),
+        "sesion": _sesion_a_dict(sesion),
+    }
+
+
+@app.post(
+    "/internal/sesiones/revocar",
+    response_model=SesionRevocarOut,
+    tags=["internal"],
+)
+def internal_sesiones_revocar(
+    body: SesionRevocar, db: Session = Depends(get_db)
+) -> dict:
+    """Revoca la sesión (logout). Idempotente: si no existe, devuelve
+    `revocada: False` con 200 (el gateway no necesita distinguir)."""
+    try:
+        revocada = revocar_sesion(db, token_hash=body.token_hash)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"revocada": revocada}
