@@ -13,7 +13,8 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/security/password.test.ts src/security/jwt.test.ts src/security/tokens.test.ts"
+    "test": "tsx --test src/security/password.test.ts src/security/jwt.test.ts src/security/tokens.test.ts src/middlewares/authMiddlewares.test.ts",
+    "crear-admin": "tsx scripts/crear-admin.ts"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",
