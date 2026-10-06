@@ -9,6 +9,13 @@ import { HttpError } from "../middlewares/errorHandler";
  *   - POST: SIN reintento (D79). Llamadas no idempotentes.
  *   - GET: 1 reintento acotado (D76), igual que el cliente público.
  *   - Timeout configurable POR LLAMADA.
+ *
+ * POST acepta `body` (JSON) y `query` (query string) por separado porque
+ * las rutas /internal/* del engine usan uno u otro según el endpoint:
+ * los de disparo (ingesta, reconciliación, auditoría, captura) no llevan
+ * parámetros; `/internal/reportes/generar` los lleva en el query; los de
+ * auth (`/internal/usuarios`, `/internal/sesiones/*`) los llevan en el
+ * body.
  */
 
 const RETRY_DELAY_MS = 300;
@@ -49,6 +56,22 @@ function buildHeaders(
     headers["X-Internal-Token"] = config.internalApiToken;
   }
   return headers;
+}
+
+/**
+ * Aplica un `query` opcional a una URL: cada clave con valor !== undefined
+ * se agrega como searchParam. Los `undefined` se omiten (para permitir
+ * opcionales).
+ */
+function applyQuery(
+  url: URL,
+  query: Record<string, string | number | boolean | undefined> | undefined,
+): void {
+  if (!query) return;
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined) continue;
+    url.searchParams.set(key, String(value));
+  }
 }
 
 async function fetchWithTimeout(
@@ -131,13 +154,23 @@ async function throwEngineError(response: Response): Promise<never> {
   );
 }
 
+/**
+ * POST a un endpoint interno del engine. SIN reintento (D79).
+ *
+ * @param body  Cuerpo JSON. Se manda `{}` si no aplica.
+ * @param query Query string opcional. Cada clave se serializa a String.
+ *              Los valores `undefined` se omiten (opcionales).
+ */
 export async function callInternalPost<T = unknown>(
   config: InternalClientConfig,
   path: string,
   body: unknown,
   options: InternalCallOptions,
+  query?: Record<string, string | number | boolean | undefined>,
 ): Promise<T> {
-  const url = new URL(path, config.engineUrl).toString();
+  const url = new URL(path, config.engineUrl);
+  applyQuery(url, query);
+  const target = url.toString();
   const timeout = options.timeoutMs ?? config.defaultTimeoutMs;
   const headers: Record<string, string> = {
     ...buildHeaders(config, options.requestId),
@@ -147,7 +180,7 @@ export async function callInternalPost<T = unknown>(
   let response: Response;
   try {
     response = await fetchWithTimeout(
-      url,
+      target,
       {
         method: "POST",
         headers,
@@ -176,6 +209,11 @@ export async function callInternalPost<T = unknown>(
   return throwEngineError(response);
 }
 
+/**
+ * GET a un endpoint interno del engine. Mismo criterio de reintento que
+ * el cliente público (D76): 1 reintento acotado ante error de conexión o
+ * 502/503/504; sin reintento ante timeout, 4xx, ni 5xx no transitorio.
+ */
 export async function callInternalGet<T = unknown>(
   config: InternalClientConfig,
   path: string,
@@ -183,10 +221,7 @@ export async function callInternalGet<T = unknown>(
   options: InternalCallOptions,
 ): Promise<T> {
   const url = new URL(path, config.engineUrl);
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined) continue;
-    url.searchParams.set(key, String(value));
-  }
+  applyQuery(url, query);
   const target = url.toString();
   const timeout = options.timeoutMs ?? config.defaultTimeoutMs;
   const headers = buildHeaders(config, options.requestId);

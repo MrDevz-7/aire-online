@@ -8,6 +8,7 @@ import morgan from "morgan";
 import type { AppConfig } from "./config/env";
 import { errorHandler, notFoundHandler } from "./middlewares/errorHandler";
 import { requestIdMiddleware } from "./middlewares/requestId";
+import { createAdminRouter } from "./routes/admin";
 import { createApiRouter } from "./routes/api";
 import { createAuthRouter } from "./routes/auth";
 import { createHealthRouter } from "./routes/health";
@@ -57,22 +58,21 @@ export function createApp(config: AppConfig): Express {
   //    (incluido el 404 y los errores). El cliente del engine lo propaga.
   app.use(requestIdMiddleware);
 
-  // 5. Parser de JSON del body, para los POST que lo necesiten
-  //    (login, refresh, logout llevan body vacío, pero el proxy admin de
-  //    M8 Bloque 4 sí manda JSON).
+  // 5. Parser de JSON del body, para los POST que lo necesiten.
   app.use(express.json({ limit: "1mb" }));
 
   // 6. Parser de cookies: necesario para leer la cookie de refresco (D78).
   app.use(cookieParser());
 
-  // 7. Rutas. Health primero. Auth después (bajo /api/auth). Finalmente
-  //    el router público con lista blanca (D76), montado bajo /api.
-  //    El orden importa: /api/auth/* se monta ANTES del router general
-  //    para que sus rutas específicas ganen (por ejemplo, /api/auth/me no
-  //    debe matchear contra ningún comodín, pero hoy el router general
-  //    no tiene comodines, así que igual no habría conflicto).
+  // 7. Rutas. Orden: health, auth, admin, público.
+  //    - /api/auth/* y /api/admin/* son específicos y van ANTES del
+  //      router general para que las rutas se resuelvan por prefijo.
+  //    - /api (general) expone los GET de lectura (D76).
+  //    - /api/admin/* (D79) es la única forma de disparar /internal/*
+  //      desde afuera; requiere rol admin.
   app.use(createHealthRouter(config));
   app.use("/api/auth", createAuthRouter(config));
+  app.use("/api/admin", createAdminRouter(config));
   app.use("/api", createApiRouter(config));
 
   // 8. 404: si ninguna ruta respondió, llega acá. Cubre también
