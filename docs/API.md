@@ -1,6 +1,3 @@
-**Ruta:** `docs/API.md` (**reemplazar todo el contenido** del archivo que ya existe)
-
-```markdown
 # API de AirE_Online
 
 Contrato HTTP público del proyecto. Vive en dos capas:
@@ -11,7 +8,8 @@ Contrato HTTP público del proyecto. Vive en dos capas:
   cuando `INTERNAL_API_TOKEN` está configurado (D79).
 - **Gateway** (Express/BFF): expone el contrato del engine al frontend
   con lista blanca (D76). Desde M8 también expone `/api/auth/*` (público)
-  y `/api/admin/*` (rol `admin`) — D77/D78/D79.
+  y `/api/admin/*` (rol `admin`) — D77/D78/D79. Desde M9 agrega rate
+  limiting a las rutas sensibles y una ruta SSE de alertas — D82/D84/D85.
 
 El frontend (M11) habla **solo** con el gateway.
 
@@ -52,6 +50,13 @@ Toda respuesta de error del gateway usa el sobre uniforme:
 ```json
 { "error": { "code": "NOT_FOUND", "message": "..." } }
 ```
+
+Los códigos definidos hoy: `BAD_REQUEST`, `UNAUTHENTICATED`,
+`UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `METHOD_NOT_ALLOWED`,
+`CONFLICT`, `VALIDATION_ERROR`, `INTERNAL_ERROR`, `REQUEST_ERROR`,
+`ENGINE_TIMEOUT`, `ENGINE_UNAVAILABLE`, `ENGINE_ERROR`,
+`INVALID_CREDENTIALS`, `INVALID_REFRESH`, `RATE_LIMITED` (M9) y
+`CAPACIDAD_AGOTADA` (M9).
 
 ---
 
@@ -102,6 +107,15 @@ Errores:
 - `401 INVALID_CREDENTIALS` — email inexistente **o** contraseña
   incorrecta **o** usuario inactivo. Mismo mensaje en los tres casos
   (defensa contra enumeración de usuarios, D78).
+- `429 RATE_LIMITED` — el límite de intentos del login se agotó. Hay dos
+  límites que devuelven este código (D82):
+  - Por IP: `RATE_LIMIT_LOGIN_IP_MAX` intentos / `RATE_LIMIT_LOGIN_VENTANA_MIN`
+    minutos, contando **todos** los intentos (exitosos y fallidos).
+  - Por email: `RATE_LIMIT_LOGIN_EMAIL_MAX` intentos fallidos /
+    `RATE_LIMIT_LOGIN_VENTANA_MIN` minutos. Un login exitoso no cuenta.
+
+  El mensaje del 429 es idéntico para email existente y no existente
+  (D86): no revela si la cuenta existe.
 
 #### `POST /api/auth/refresh`
 
@@ -115,6 +129,9 @@ Errores:
   **reusada**. Reusar un token ya rotado revoca todas las sesiones
   activas del usuario (D77).
 - `403 FORBIDDEN` — `Origin` ausente o no permitido (defensa CSRF, D78).
+- `429 RATE_LIMITED` — el límite por IP del refresh
+  (`RATE_LIMIT_REFRESH_IP_MAX` / `RATE_LIMIT_LOGIN_VENTANA_MIN` minutos)
+  se agotó.
 
 #### `POST /api/auth/logout`
 
@@ -139,7 +156,7 @@ Errores:
 
 Requiere `requireAuth` + rol `admin`. Las llamadas son `POST` no
 idempotentes: **sin reintento**. Timeout propio `ADMIN_TIMEOUT_MS`
-(default 120 s).
+(default 120 s). Rate limit por usuario autenticado (M9, D82).
 
 Lista blanca explícita 1:1 con las rutas `/internal/*` de disparo del
 engine:
@@ -160,6 +177,12 @@ Zod **estricto** por ruta: cualquier query param no declarado devuelve
 `400 BAD_REQUEST`. Las respuestas son las mismas que devuelve el engine
 en `/internal/*`.
 
+Errores:
+- `429 RATE_LIMITED` — el límite por usuario
+  (`RATE_LIMIT_ADMIN_POR_MINUTO` por minuto) se agotó. La clave es el
+  `id` del usuario autenticado; si por algún motivo no hay usuario en
+  `res.locals`, cae a IP.
+
 Cada acción administrativa deja un **registro en el log del gateway**:
 `{event: "admin_action", userId, rol, method, path, requestId, status, durationMs}`.
 Sin cuerpos ni secretos.
@@ -167,6 +190,55 @@ Sin cuerpos ni secretos.
 **Lo que NO se expone** (por diseño, D79): `/internal/usuarios*` y
 `/internal/sesiones*`. Son de uso exclusivo de `/api/auth/*`. Intentar
 `POST /api/admin/usuarios` → `404`.
+
+### Alertas en tiempo real (`GET /api/alertas/stream`, M9)
+
+Server-Sent Events (D84). Solo lectura, sin auth. Empuja las alertas
+abiertas al navegador a medida que aparecen o se cierran. El frontend lo
+consume con `new EventSource(...)`.
+
+**Formato:** `text/event-stream`. Cada evento es un bloque terminado en
+línea en blanco. Tres tipos de evento:
+
+```
+event: snapshot
+data: [ ...alertas abiertas actuales... ]
+
+event: alerta_nueva
+data: { ...alerta... }
+
+event: alerta_cerrada
+data: { ...alerta... }
+```
+
+- **`snapshot`**: al conectar, o cuando un cliente se suscribe con el
+  poller ya corriendo, para que un cliente que reconecta recupere el
+  estado sin depender de eventos perdidos.
+- **`alerta_nueva`**: una alerta que no estaba en la vuelta anterior.
+- **`alerta_cerrada`**: una alerta que apareció antes y ya no está en la
+  respuesta de `GET /api/alertas` (porque pasó a `normalizada`).
+
+**Heartbeat:** un comentario `: ping` cada `SSE_HEARTBEAT_MS` (default
+25000 ms) mantiene la conexión viva a través de proxies que cortan por
+inactividad.
+
+**Límite de clientes:** `SSE_MAX_CLIENTS` (default 200). Al superarlo,
+el gateway responde `503 CAPACIDAD_AGOTADA` sin abrir el stream:
+
+```json
+{"error":{"code":"CAPACIDAD_AGOTADA","message":"El servidor alcanzó el máximo de conexiones SSE. Probá más tarde."}}
+```
+
+**Fuente de los eventos:** un único poller en el gateway que consulta
+`GET /api/alertas` del engine cada `ALERTAS_POLL_MS` (default 30000 ms)
+**solo mientras haya al menos un cliente conectado**. Cuando el último
+cliente se desconecta, el poller se detiene. Ver D85 para el trade-off
+(el engine no duerme mientras haya un cliente SSE conectado).
+
+**Nota sobre capacidad:** con los defaults `ALERTAS_POLL_MS=30000` y
+`SSE_MAX_CLIENTS=200`, todos los clientes comparten un solo poller, así
+que el engine recibe ~2 consultas/min sin importar cuántas pestañas haya
+abiertas.
 
 ---
 
@@ -207,14 +279,10 @@ Rutas de **auth** (solo las llama el gateway, **no** están en el proxy):
 
 ---
 
-## Seguridad de M8: pendientes conocidos
+## Seguridad: pendientes conocidos
 
-Lo que M8 **no** cubre y queda para otros módulos:
+Lo que **no** está cubierto hoy y queda para otros módulos:
 
-- **Rate limiting (M9).** No hay límite de intentos de login. Un atacante
-  puede probar combinaciones de email/password sin ser bloqueado. La
-  respuesta es genérica (D78), pero el tiempo es finito: es exactamente
-  lo que M9 resuelve.
 - **Purga de sesiones vencidas (M10).** La tabla `sesiones_refresh` crece
   indefinidamente. La rotación crea filas y el reuso las revoca, pero
   nada las borra. M10 (scheduler) agrega el job de purga.
@@ -223,6 +291,14 @@ Lo que M8 **no** cubre y queda para otros módulos:
   desarrollo. Si en producción el frontend vive en otro dominio, hace
   falta `COOKIE_SAMESITE=none` + `Secure` + HTTPS real (el validador
   de env ya lo exige).
+- **Render y el poller SSE (M12).** Mientras haya un cliente SSE
+  conectado, el poller despierta al engine cada `ALERTAS_POLL_MS` y eso
+  impide que el engine duerma en Render gratuito. Se revisita en M12.
+- **Contadores de rate limiting en memoria.** El almacenamiento de
+  `express-rate-limit` es en memoria del proceso (D82). Se reinician al
+  reiniciar el gateway. Con múltiples instancias del gateway, el límite
+  efectivo se multiplicaría por la cantidad de instancias. Para un
+  portafolio con un solo proceso, es suficiente.
 - **Sin recuperación de contraseña ni verificación de email.** No hay
   SMTP gratuito previsto (D78). El dueño del proyecto puede resetear una
   contraseña manualmente con `npm run crear-admin` (que crea otra cuenta)
@@ -232,4 +308,3 @@ Lo que M8 **no** cubre y queda para otros módulos:
 - **`COOKIE_SAMESITE=strict` no es viable** si el frontend y el gateway
   están en dominios hermanos del mismo sitio: en la práctica `lax` es lo
   correcto para este caso de uso.
-```
