@@ -1,9 +1,9 @@
 // gateway/src/routes/admin.ts
 import { Router } from "express";
 import { z } from "zod";
-
 import type { AppConfig } from "../config/env";
 import { HttpError } from "../middlewares/errorHandler";
+import { adminPorUsuario } from "../middlewares/rateLimit";
 import { createRequireAuth } from "../middlewares/requireAuth";
 import { requireRole } from "../middlewares/requireRole";
 import {
@@ -20,6 +20,11 @@ import {
  *
  * Diferencias con el router público `/api/*` (D76):
  *   - Exige `requireAuth` + `requireRole('admin')`.
+ *   - Rate limit por usuario autenticado (M9, D82): 10 acciones/min por
+ *     defecto. El limitador se instancia UNA VEZ fuera del loop de rutas,
+ *     así todas las rutas comparten el mismo bucket por usuario (si se
+ *     instanciara por ruta, cada ruta tendría su propio contador y el
+ *     límite se multiplicaría por la cantidad de rutas).
  *   - Es POST, no GET (son acciones no idempotentes: SIN reintento).
  *   - Timeout más largo (`ADMIN_TIMEOUT_MS`, default 120 s): la ingesta
  *     y la captura pueden tardar.
@@ -92,7 +97,6 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
     querySchema: sinParams,
     description: "ingesta SIATA",
   },
-
   // --- Reconciliación ---
   {
     path: "reconciliacion/emparejar",
@@ -106,7 +110,6 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
     querySchema: sinParams,
     description: "reconciliación: comparar",
   },
-
   // --- Auditoría y pronósticos ---
   {
     path: "audit/run",
@@ -120,7 +123,6 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
     querySchema: sinParams,
     description: "capturar pronósticos Open-Meteo",
   },
-
   // --- Reportes ---
   {
     path: "reportes/generar",
@@ -184,7 +186,9 @@ function toQuery(
 export function createAdminRouter(config: AppConfig): Router {
   const router = Router();
   const requireAuth = createRequireAuth(config.jwtSecret);
-
+  // El limitador se instancia UNA VEZ, fuera del loop: todas las rutas
+  // comparten el mismo bucket por usuario (M9, D82).
+  const rateLimitAdmin = adminPorUsuario(config);
   const client: InternalClientConfig = {
     engineUrl: config.engineUrl,
     internalApiToken: config.internalApiToken,
@@ -196,11 +200,11 @@ export function createAdminRouter(config: AppConfig): Router {
       `/${route.path}`,
       requireAuth,
       requireRole("admin"),
+      rateLimitAdmin,
       async (req, res) => {
         const startedAt = Date.now();
         const user = res.locals.user as { id: number; rol: string };
         const requestId = String(res.locals.requestId ?? "");
-
         try {
           // Validar query (Zod estricto por ruta).
           const parsed = route.querySchema.safeParse(req.query);
@@ -211,7 +215,6 @@ export function createAdminRouter(config: AppConfig): Router {
               z.prettifyError(parsed.error),
             );
           }
-
           // Llamar al engine. POST SIN reintento (D79): no idempotente.
           // Los parámetros validados viajan como QUERY STRING (no como
           // body) porque las rutas /internal/* del engine los leen de ahí.
@@ -222,7 +225,6 @@ export function createAdminRouter(config: AppConfig): Router {
             { requestId, timeoutMs: config.adminTimeoutMs },
             toQuery(parsed.data as Record<string, unknown>),
           );
-
           const durationMs = Date.now() - startedAt;
           logAdminAction({
             event: "admin_action",
@@ -255,7 +257,6 @@ export function createAdminRouter(config: AppConfig): Router {
       },
     );
   }
-
   return router;
 }
 

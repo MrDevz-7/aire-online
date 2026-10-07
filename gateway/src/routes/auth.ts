@@ -1,9 +1,13 @@
 // gateway/src/routes/auth.ts
 import { Router } from "express";
 import { z } from "zod";
-
 import type { AppConfig } from "../config/env";
 import { HttpError } from "../middlewares/errorHandler";
+import {
+  loginPorEmail,
+  loginPorIp,
+  refreshPorIp,
+} from "../middlewares/rateLimit";
 import { createRequireAuth } from "../middlewares/requireAuth";
 import { createRequireOrigin } from "../middlewares/requireOrigin";
 import { PASSWORD_MIN_LENGTH } from "../security/password";
@@ -20,13 +24,18 @@ import { crearAuthService } from "../services/authService";
  * NO hay ruta de registro público (D78): las cuentas las crea el dueño
  * con `npm run crear-admin`.
  *
+ * Rate limiting (M9, D82/D86):
+ *   - login: por IP (todos los intentos) Y por email (solo los fallidos).
+ *   - refresh: por IP.
+ *   - logout: SIN rate limit propio (el refresh que lo precede ya está
+ *     limitado; el logout es idempotente y barato).
+ *
  * La cookie de refresco (D78):
  *   - httpOnly                → JS no la lee (evita XSS de lectura).
  *   - Secure en production    → solo HTTPS.
  *   - SameSite configurable   → `lax` por defecto.
  *   - Path=/api/auth          → no viaja en cada request, solo a auth.
  */
-
 export const COOKIE_REFRESH = "refresh_token";
 const COOKIE_PATH = "/api/auth";
 
@@ -52,26 +61,39 @@ export function createAuthRouter(config: AppConfig): Router {
   const router = Router();
   const requireAuth = createRequireAuth(config.jwtSecret);
   const requireOrigin = createRequireOrigin(config.corsOrigins);
+  const rateLimitLoginIp = loginPorIp(config);
+  const rateLimitLoginEmail = loginPorEmail(config);
+  const rateLimitRefresh = refreshPorIp(config);
   const auth = crearAuthService(config);
 
   // POST /api/auth/login
-  router.post("/login", async (req, res) => {
-    const parsed = loginSchema.safeParse(req.body);
-    if (!parsed.success) {
-      throw new HttpError(400, "BAD_REQUEST", z.prettifyError(parsed.error));
-    }
-    const { accessToken, expiresIn, user, refreshToken, refreshExpiresAt } =
-      await auth.login(parsed.data);
-
-    res.cookie(COOKIE_REFRESH, refreshToken, {
-      ...cookieOptions(config),
-      maxAge: Math.max(0, refreshExpiresAt.getTime() - Date.now()),
-    });
-    res.json({ accessToken, expiresIn, user });
-  });
+  // Rate limit: primero por IP (todos los intentos), después por email
+  // (solo fallidos). El rate limit por email necesita el body ya parseado;
+  // `express.json()` corre global en app.ts antes de las rutas, así que
+  // acá el body está disponible.
+  router.post(
+    "/login",
+    rateLimitLoginIp,
+    rateLimitLoginEmail,
+    async (req, res) => {
+      const parsed = loginSchema.safeParse(req.body);
+      if (!parsed.success) {
+        throw new HttpError(400, "BAD_REQUEST", z.prettifyError(parsed.error));
+      }
+      const { accessToken, expiresIn, user, refreshToken, refreshExpiresAt } =
+        await auth.login(parsed.data);
+      res.cookie(COOKIE_REFRESH, refreshToken, {
+        ...cookieOptions(config),
+        maxAge: Math.max(0, refreshExpiresAt.getTime() - Date.now()),
+      });
+      res.json({ accessToken, expiresIn, user });
+    },
+  );
 
   // POST /api/auth/refresh
-  router.post("/refresh", requireOrigin, async (req, res) => {
+  // Rate limit por IP ANTES de requireOrigin: la defensa externa (rate
+  // limit) corre primero. requireOrigin sigue siendo obligatorio (D78).
+  router.post("/refresh", rateLimitRefresh, requireOrigin, async (req, res) => {
     const token = req.cookies?.[COOKIE_REFRESH];
     if (typeof token !== "string" || !token) {
       throw new HttpError(401, "INVALID_REFRESH", "Falta la cookie de refresco");

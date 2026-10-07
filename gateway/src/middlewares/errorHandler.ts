@@ -1,13 +1,44 @@
 import type { ErrorRequestHandler, RequestHandler } from "express";
 
 /**
+ * Códigos de error canónicos del gateway. Se listan los conocidos para
+ * tener autocompletado y un único lugar donde buscarlos. La cláusula
+ * final `(string & {})` permite cualquier otro string: los códigos de
+ * error de D76 no se restringen, y agregar un código nuevo (como
+ * RATE_LIMITED y CAPACIDAD_AGOTADA en M9) no rompe nada existente.
+ *
+ * - D76: sobre uniforme {error:{code,message}} para todas las respuestas.
+ * - M9: RATE_LIMITED (429) y CAPACIDAD_AGOTADA (503, SSE) — D86.
+ */
+export type ErrorCode =
+  | "BAD_REQUEST"
+  | "UNAUTHENTICATED"
+  | "UNAUTHORIZED"
+  | "FORBIDDEN"
+  | "NOT_FOUND"
+  | "METHOD_NOT_ALLOWED"
+  | "CONFLICT"
+  | "VALIDATION_ERROR"
+  | "INTERNAL_ERROR"
+  | "REQUEST_ERROR"
+  | "ENGINE_TIMEOUT"
+  | "ENGINE_UNAVAILABLE"
+  | "ENGINE_ERROR"
+  | "INVALID_CREDENTIALS"
+  | "INVALID_REFRESH"
+  // M9 (D86):
+  | "RATE_LIMITED"
+  | "CAPACIDAD_AGOTADA"
+  | (string & {});
+
+/**
  * Error "esperado" que el código de negocio puede lanzar a propósito
  * (por ejemplo: throw new HttpError(400, "BAD_REQUEST", "Falta el parámetro x")).
  */
 export class HttpError extends Error {
   constructor(
     public readonly status: number,
-    public readonly code: string,
+    public readonly code: ErrorCode,
     message: string,
   ) {
     super(message);
@@ -17,7 +48,7 @@ export class HttpError extends Error {
 
 /** Forma única de TODA respuesta de error del gateway. */
 interface ErrorBody {
-  error: { code: string; message: string };
+  error: { code: ErrorCode; message: string };
 }
 
 /**
@@ -43,11 +74,9 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
     next(err);
     return;
   }
-
   let status = 500;
-  let code = "INTERNAL_ERROR";
+  let code: ErrorCode = "INTERNAL_ERROR";
   let message = "Error interno del servidor";
-
   if (err instanceof HttpError) {
     status = err.status;
     code = err.code;
@@ -58,12 +87,10 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
     code = "REQUEST_ERROR";
     message = "La petición no es válida";
   }
-
   if (status >= 500) {
     // El detalle real queda en el log del servidor, NUNCA en la respuesta.
     console.error("[error]", err);
   }
-
   const body: ErrorBody = { error: { code, message } };
   res.status(status).json(body);
 };
