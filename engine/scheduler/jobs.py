@@ -7,11 +7,7 @@ D88: los jobs llaman DIRECTO a las funciones de servicio
 `/api/admin/*` de sí mismos. Mismo proceso, mismo intérprete: la vuelta
 de red y el `INTERNAL_API_TOKEN` son innecesarios.
 
-Bloque 1: solo un job de prueba que loguea. Los jobs reales se agregan
-en los bloques 2 (ingesta), 3 (pronósticos), 4 (auditoría) y 5 (purgas).
-El job de prueba se retira cuando entre el primero de ellos.
-
-Cada job real va a seguir este patrón:
+Patrón de cada job real:
     def job_xxx() -> None:
         db = SessionLocal()
         try:
@@ -23,30 +19,139 @@ Cada job real va a seguir este patrón:
             logger.exception("[scheduler] xxx falló")
         finally:
             db.close()
+
+Bloques implementados:
+    - Bloque 2 (este): job_ingesta, cada hora al minuto :05 (D89).
+    - Bloques 3, 4 y 5: captura de pronósticos, auditoría y purgas.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from typing import Callable, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlalchemy.orm import Session
+
+from database.config import settings
+from database.session import SessionLocal
+from services.ingestion import (
+    ResumenIngestion,
+    ejecutar_aqicn,
+    ejecutar_iboca,
+    ejecutar_openaq,
+    ejecutar_siata,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Job de prueba (Bloque 1)
+# Zona horaria de los cron triggers (D89).
 # ---------------------------------------------------------------------------
-def job_de_prueba() -> None:
-    """Job no-op que loguea la hora.
+# Se declara acá (no en scheduler.py) porque es una propiedad de los
+# jobs, no del scheduler en sí. El scheduler también la usa como default,
+# pero el CronTrigger la pisa con la suya para que quede explícita.
+ZONA_HORARIA = "America/Bogota"
 
-    Se retira en el Bloque 2 cuando entre el primer job real. Sirve para
-    verificar en los logs del engine que el scheduler corre y dispara a
-    horario. No toca la base ni la red.
+
+# ---------------------------------------------------------------------------
+# Bloque 2 — Job de ingesta repartida
+# ---------------------------------------------------------------------------
+def _fuentes_ingesta() -> tuple[tuple[str, Callable[[Session], ResumenIngestion]], ...]:
+    """Tupla (nombre, función) de las 4 fuentes de ingesta.
+
+    Se construye en CADA llamada (no es constante de módulo) para que
+    los tests puedan mockear con `patch("scheduler.jobs.ejecutar_openaq")`:
+    el patch reemplaza el atributo del módulo y esta función lo lee en
+    tiempo de ejecución. Una constante de módulo hubiera capturado la
+    referencia original antes del patch.
     """
+    return (
+        ("openaq", ejecutar_openaq),
+        ("aqicn", ejecutar_aqicn),
+        ("iboca", ejecutar_iboca),
+        ("siata", ejecutar_siata),
+    )
+
+
+def _ejecutar_una_fuente(
+    fuente: str,
+    funcion: Callable[[Session], ResumenIngestion],
+    db: Session,
+    resumen: dict[str, dict],
+) -> None:
+    """Ejecuta la ingesta de UNA fuente y guarda el resultado en `resumen`.
+
+    No propaga excepciones: el caller itera las 4 fuentes y quiere que
+    una falle sin tumbar a las demás. El error se loguea con stack trace
+    (logger.exception) y se registra como `{"error": str(exc)}`.
+    """
+    try:
+        r = funcion(db)
+        resumen[fuente] = r.a_dict()
+        logger.info(
+            "[scheduler] ingesta %s OK: %d estaciones nuevas, "
+            "%d lecturas insertadas, %d duplicadas, %d invalidas",
+            fuente,
+            r.estaciones_nuevas,
+            r.lecturas_insertadas,
+            r.lecturas_duplicadas,
+            r.lecturas_invalidas,
+        )
+    except Exception as exc:
+        # Captura amplia a propósito: cualquier fallo de una fuente (red,
+        # rate limit, error de parsing) se registra y se sigue con las
+        # demás. Las excepciones específicas (OpenAQError, AQICNError,
+        # IBOCAError, SIATAError) ya se manejan dentro de cada cliente y
+        # devuelven un resultado parcial; esto es la red de seguridad por
+        # si una excepción se escapa igual.
+        resumen[fuente] = {"error": str(exc)}
+        logger.exception("[scheduler] ingesta %s falló", fuente)
+
+
+def ejecutar_ingesta(db: Session) -> dict[str, dict]:
+    """Ejecuta la ingesta de las 4 fuentes en secuencia.
+
+    Devuelve `{fuente: resumen_a_dict | {"error": str}}`.
+
+    NUNCA lanza: el caller (job_ingesta) no tiene a quién avisarle, y el
+    scheduler no debe morir por una fuente caída. Si las 4 fuentes
+    fallan, el diccionario va a tener 4 entradas con `error`.
+
+    Sobre la sesión compartida: las 4 fuentes usan la MISMA `db` y cada
+    `ejecutar_*` hace su propio commit al final (ver
+    `services/ingestion.ingerir`). No hay transacción larga compartida
+    entre fuentes: si OpenAQ commitea y después AQICN falla a mitad de
+    su transacción, el rollback de AQICN no afecta los datos ya
+    persistidos de OpenAQ. Es el comportamiento que queremos (D15: los
+    datos de una fuente no dependen de los de otra).
+    """
+    resumen: dict[str, dict] = {}
+    for fuente, funcion in _fuentes_ingesta():
+        _ejecutar_una_fuente(fuente, funcion, db, resumen)
+    return resumen
+
+
+def job_ingesta() -> None:
+    """Wrapper del job de ingesta: abre y cierra la sesión de base.
+
+    APScheduler lo invoca sin argumentos. Todo el trabajo real está en
+    `ejecutar_ingesta`, que sí recibe `db` — así los tests pueden
+    inyectar una sesión sin arrancar el scheduler.
+    """
+    db = SessionLocal()
+    try:
+        resumen = ejecutar_ingesta(db)
+    finally:
+        db.close()
+    # Log resumen de la corrida completa, para que quede en los logs del
+    # proceso aunque cada fuente ya haya logueado su resultado.
+    ok = [f for f, r in resumen.items() if "error" not in r]
+    fallidas = [f for f, r in resumen.items() if "error" in r]
     logger.info(
-        "[scheduler] job_de_prueba ejecutado a las %s",
-        datetime.now().isoformat(timespec="seconds"),
+        "[scheduler] ingesta completa: %d/%d fuentes OK (%s); fallidas: %s",
+        len(ok), len(resumen), ", ".join(ok) or "ninguna",
+        ", ".join(fallidas) or "ninguna",
     )
 
 
@@ -56,25 +161,21 @@ def job_de_prueba() -> None:
 def registrar_jobs(sched: BackgroundScheduler) -> None:
     """Registra todos los jobs del scheduler.
 
-    Bloque 1: solo el job de prueba (intervalo de 5 min). En los bloques
-    siguientes se reemplaza por los `CronTrigger` de D89 (hora local
-    America/Bogota):
-        - ingesta:      cada hora al minuto :05
-        - pronósticos:  04:10
-        - auditoría:    04:40
-        - purgas:       05:10
-    Cada job va con `max_instances=1` y `misfire_grace_time` razonable,
-    para que no se acumulen corridas si el proceso estuvo caído un rato.
+    Cada `add_job` lleva `replace_existing=True`, `max_instances=1` y un
+    `misfire_grace_time` razonable. El `id` es el que aparece en los logs
+    y en `sched.get_jobs()`, útil para verificar la programación.
+
+    Programación vigente (D89, hora local `America/Bogota`):
+        - ingesta:  cada hora, minuto :05
     """
     sched.add_job(
-        job_de_prueba,
-        trigger="interval",
-        minutes=5,
-        id="prueba_m10",
+        job_ingesta,
+        trigger="cron",
+        hour="*",
+        minute=5,
+        timezone=ZONA_HORARIA,
+        id="ingesta",
         replace_existing=True,
         max_instances=1,
-        # Si el proceso estuvo caído y "se perdió" el horario programado,
-        # todavía se corre si pasaron menos de 60s desde el horario
-        # original. Con más de eso, se descarta y se espera al próximo.
-        misfire_grace_time=60,
+        misfire_grace_time=600,
     )
