@@ -2,7 +2,6 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
-
 import { createApp } from "../app";
 import type { AppConfig } from "../config/env";
 import { signAccessToken } from "../security/jwt";
@@ -19,7 +18,6 @@ import { signAccessToken } from "../security/jwt";
  * llamadas del test (`http://localhost:PORT/api/admin/...`) también se
  * interceptan y NUNCA llegan a la app. Es el bug que se corrigió acá.
  */
-
 const SECRET = "x".repeat(48);
 const ENGINE_URL = "http://engine.test";
 const TOKEN_INTERNO = "token-interno-de-test";
@@ -75,6 +73,18 @@ before(async () => {
     cookieSameSite: "lax",
     internalApiToken: TOKEN_INTERNO,
     adminTimeoutMs: 5000,
+    // M9: valores de test. El test de admin NO prueba rate limiting
+    // (eso vive en rateLimit.test.ts en el Bloque 2); acá se usan valores
+    // altos para no bloquear las llamadas del propio test.
+    trustProxy: 0,
+    rateLimitLoginIpMax: 10,
+    rateLimitLoginEmailMax: 5,
+    rateLimitLoginVentanaMin: 15,
+    rateLimitRefreshIpMax: 60,
+    rateLimitAdminPorMinuto: 10_000,
+    alertasPollMs: 30_000,
+    sseMaxClients: 200,
+    sseHeartbeatMs: 25_000,
   };
 
   const app = createApp(config);
