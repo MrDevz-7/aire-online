@@ -2,3 +2,7 @@
 repomix.config.json
 repomix-estructura.xml
 .env
+
+cookies.txt
+login.json
+login_response.json
