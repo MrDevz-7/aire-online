@@ -14,7 +14,8 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/security/password.test.ts src/security/jwt.test.ts src/security/tokens.test.ts src/middlewares/authMiddlewares.test.ts src/middlewares/rateLimit.test.ts src/routes/auth.test.ts src/routes/admin.test.ts src/services/alertasPoller.test.ts src/routes/stream.test.ts",
-    "crear-admin": "tsx scripts/crear-admin.ts"
+    "crear-admin": "tsx scripts/crear-admin.ts",
+    "rehash-admin": "tsx scripts/rehash-admin.ts"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",
