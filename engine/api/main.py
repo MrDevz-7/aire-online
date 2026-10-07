@@ -97,7 +97,11 @@ from services.usuarios import (
     crear_usuario,
     registrar_login,
 )
+# M10 (D87): scheduler embebido. `iniciar_scheduler` es no-op si
+# SCHEDULER_ENABLED=false (el chequeo vive dentro del propio scheduler).
+from scheduler.scheduler import detener_scheduler, iniciar_scheduler
 from sources.aqicn import AQICNConfigError, AQICNError
+
 from sources.iboca import IBOCAError
 from sources.open_meteo import OpenMeteoConfigError, OpenMeteoError
 from sources.openaq import OpenAQConfigError, OpenAQError
@@ -129,9 +133,17 @@ def validar_arranque(environment: str, internal_token: str) -> None:
 async def lifespan(_app: FastAPI):
     """Arranque: valida la configuración obligatoria antes de aceptar
     tráfico. Si `ENVIRONMENT=production` y `INTERNAL_API_TOKEN` está
-    vacío, la app no arranca (uvicorn sale con código distinto de 0)."""
+    vacío, la app no arranca (uvicorn sale con código distinto de 0).
+
+    M10 (D87): además arranca el scheduler embebido. Si
+    `SCHEDULER_ENABLED=false`, `iniciar_scheduler()` es no-op (loguea
+    un aviso y no registra ningún job). El shutdown detiene el
+    scheduler para que los threads de los jobs no queden colgados.
+    """
     validar_arranque(settings.ENVIRONMENT, settings.INTERNAL_API_TOKEN)
+    iniciar_scheduler()
     yield
+    detener_scheduler()
 
 
 app = FastAPI(
