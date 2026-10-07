@@ -7,6 +7,10 @@ Para no llamar a Gemini en los tests, el POST siempre va con
 `forzar_plantilla=true`. Además el `alcance` de prueba no matchea ninguna
 ciudad real, así que la ficha sale vacía y la plantilla devuelve el aviso
 "no hay datos" — verificado en `test_post_forzar_plantilla_*`.
+M8 (D79) agregó el `InternalTokenMiddleware`: si `INTERNAL_API_TOKEN`
+está configurado en el `.env`, las rutas `/internal/*` exigen la
+cabecera `X-Internal-Token`. Este archivo la manda en todos los POST
+que van a `/internal/*`; los GET a `/api/*` no la necesitan.
 Se corren con:
     cd engine
     python -m unittest api.test_main -v
@@ -16,6 +20,7 @@ import unittest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 from api.main import app
+from database.config import settings
 from database.models import Reporte
 from database.session import SessionLocal
 PREFIJO_ALCANCE = "TEST_M6_API_"
@@ -27,6 +32,11 @@ class TestReportesEndpoints(unittest.TestCase):
         self.client = TestClient(app)
         self.db = SessionLocal()
         _limpiar(self.db)
+        # M8 (D79): el middleware exige X-Internal-Token si está
+        # configurado. Si está vacío (dev local sin token), el
+        # middleware deja pasar; igual mandamos la cabecera con el valor
+        # que tenga, para no duplicar lógica entre los dos casos.
+        self.headers_internal = {"X-Internal-Token": settings.INTERNAL_API_TOKEN}
     def tearDown(self) -> None:
         _limpiar(self.db)
         self.db.close()
@@ -40,6 +50,7 @@ class TestReportesEndpoints(unittest.TestCase):
                 "alcance": alcance,
                 "forzar_plantilla": "true",
             },
+            headers=self.headers_internal,
         )
     # ------------------------------------------------------------------
     # POST /internal/reportes/generar
@@ -70,6 +81,7 @@ class TestReportesEndpoints(unittest.TestCase):
         r = self.client.post(
             "/internal/reportes/generar",
             params={"tipo": "no_existe", "alcance": self._alcance("c")},
+            headers=self.headers_internal,
         )
         self.assertEqual(r.status_code, 400)
         self.assertIn("no_existe", r.json()["detail"])
