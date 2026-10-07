@@ -1,5 +1,5 @@
 """
-Tests de los jobs del scheduler (M10 Bloque 2).
+Tests de los jobs del scheduler (M10 Bloques 2 y 3).
 
 Puros: mockean las funciones de servicio y la sesión de base. No arrancan
 el scheduler real, no tocan red, no tocan Postgres.
@@ -18,6 +18,7 @@ from scheduler.jobs import (
     _fuentes_ingesta,
     ejecutar_ingesta,
     job_ingesta,
+    job_pronosticos,
 )
 
 
@@ -147,6 +148,50 @@ class TestJobIngestaAbreYCierraSesion(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 job_ingesta()
             m_session.return_value.close.assert_called_once()
+
+
+class TestJobPronosticos(unittest.TestCase):
+    """Tests del job de captura de pronósticos (M10 Bloque 3)."""
+
+    def test_exito_loguea_sin_error(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.capturar_pronosticos") as m_capturar:
+            m_session.return_value = MagicMock()
+            m_resumen = MagicMock()
+            m_resumen.pronosticos_insertados = 5
+            m_resumen.pronosticos_ya_existian = 0
+            m_resumen.auditorias_creadas = 5
+            m_resumen.requests = 2
+            m_resumen.por_horizonte = {1: 3, 2: 2}
+            m_capturar.return_value = m_resumen
+
+            # No debe lanzar:
+            job_pronosticos()
+
+        m_capturar.assert_called_once_with(m_session.return_value)
+        m_session.return_value.close.assert_called_once()
+
+    def test_falla_no_propaga(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.capturar_pronosticos") as m_capturar:
+            m_session.return_value = MagicMock()
+            m_capturar.side_effect = RuntimeError("Open-Meteo caído")
+
+            # No debe lanzar: el scheduler no debe morir por esto.
+            job_pronosticos()
+
+        # Y la sesión igual se cerró (finally):
+        m_session.return_value.close.assert_called_once()
+
+    def test_cierra_sesion_aunque_exito(self) -> None:
+        # Idempotente con el test de éxito, pero separado para que quede
+        # explícito el contrato de "siempre cierra".
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.capturar_pronosticos") as m_capturar:
+            m_session.return_value = MagicMock()
+            m_capturar.return_value = MagicMock()
+            job_pronosticos()
+        m_session.return_value.close.assert_called_once()
 
 
 if __name__ == "__main__":

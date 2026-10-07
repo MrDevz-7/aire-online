@@ -21,18 +21,18 @@ Patrón de cada job real:
             db.close()
 
 Bloques implementados:
-    - Bloque 2 (este): job_ingesta, cada hora al minuto :05 (D89).
-    - Bloques 3, 4 y 5: captura de pronósticos, auditoría y purgas.
+    - Bloque 2: job_ingesta (cada hora al minuto :05).
+    - Bloque 3 (este): job_pronosticos (04:10, D89).
+    - Bloques 4 y 5: auditoría diaria y purgas.
 """
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 
-from database.config import settings
 from database.session import SessionLocal
 from services.ingestion import (
     ResumenIngestion,
@@ -41,6 +41,7 @@ from services.ingestion import (
     ejecutar_openaq,
     ejecutar_siata,
 )
+from services.pronosticos import capturar_pronosticos
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +157,40 @@ def job_ingesta() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bloque 3 — Job de captura diaria de pronósticos (D62, D89)
+# ---------------------------------------------------------------------------
+def job_pronosticos() -> None:
+    """Wrapper del job de captura diaria de pronósticos (Open-Meteo).
+
+    `capturar_pronosticos` es idempotente por diseño (D62): la primera
+    captura del día gana. Si el job corre y ya existen los pronósticos
+    del día, no inserta nada nuevo (`pronosticos_insertados=0`,
+    `pronosticos_ya_existian>0`). Por eso alcanza con UNA corrida
+    diaria, a diferencia de la ingesta que se reparte durante el día.
+
+    Nunca lanza: el scheduler no tiene a quién avisarle. Los errores de
+    red/config de Open-Meteo se atrapan y loguean con stack trace.
+    """
+    db = SessionLocal()
+    try:
+        r = capturar_pronosticos(db)
+        logger.info(
+            "[scheduler] captura de pronósticos OK: insertados=%d, "
+            "ya_existian=%d, auditorías_creadas=%d, requests=%d, "
+            "por_horizonte=%s",
+            r.pronosticos_insertados,
+            r.pronosticos_ya_existian,
+            r.auditorias_creadas,
+            r.requests,
+            r.por_horizonte,
+        )
+    except Exception:
+        logger.exception("[scheduler] captura de pronósticos falló")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Registro de jobs
 # ---------------------------------------------------------------------------
 def registrar_jobs(sched: BackgroundScheduler) -> None:
@@ -166,7 +201,8 @@ def registrar_jobs(sched: BackgroundScheduler) -> None:
     y en `sched.get_jobs()`, útil para verificar la programación.
 
     Programación vigente (D89, hora local `America/Bogota`):
-        - ingesta:  cada hora, minuto :05
+        - ingesta:      cada hora, minuto :05
+        - pronósticos:  04:10
     """
     sched.add_job(
         job_ingesta,
@@ -178,4 +214,18 @@ def registrar_jobs(sched: BackgroundScheduler) -> None:
         replace_existing=True,
         max_instances=1,
         misfire_grace_time=600,
+    )
+    sched.add_job(
+        job_pronosticos,
+        trigger="cron",
+        hour=4,
+        minute=10,
+        timezone=ZONA_HORARIA,
+        id="pronosticos",
+        replace_existing=True,
+        max_instances=1,
+        # 1 hora de gracia: si el proceso se reinicia y la corrida de las
+        # 04:10 se atrasa menos de 60 min, se recupera; si más, se saltea
+        # y espera al día siguiente.
+        misfire_grace_time=3600,
     )

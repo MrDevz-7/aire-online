@@ -1,7 +1,7 @@
 """
-Tests del arranque/parada del scheduler (M10 Bloque 2).
+Tests del arranque/parada del scheduler (M10 Bloques 2 y 3).
 
-Verifican la guarda `SCHEDULER_ENABLED` y el registro del job de ingesta.
+Verifican la guarda `SCHEDULER_ENABLED` y el registro de los jobs.
 No tocan red ni base.
 
 Se corren con:
@@ -91,6 +91,39 @@ class TestSchedulerHabilitado(unittest.TestCase):
         # Idempotente: no debe lanzar.
         sched_mod.detener_scheduler()
         self.assertIsNone(sched_mod._scheduler)
+
+    # ----- Bloque 3: job de pronósticos -----------------------------------
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_arranca_y_registra_job_pronosticos(self) -> None:
+        sched_mod.iniciar_scheduler()
+        ids = {j.id for j in sched_mod._scheduler.get_jobs()}
+        self.assertIn("pronosticos", ids)
+        # El job del Bloque 2 sigue registrado también:
+        self.assertIn("ingesta", ids)
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_job_pronosticos_tiene_trigger_cron_a_las_04_10(self) -> None:
+        sched_mod.iniciar_scheduler()
+        job = sched_mod._scheduler.get_job("pronosticos")
+        self.assertIsNotNone(job)
+        campos = {f.name: str(f) for f in job.trigger.fields}
+        self.assertEqual(campos["hour"], "4")
+        self.assertEqual(campos["minute"], "10")
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_job_pronosticos_tiene_misfire_grace_time_1h(self) -> None:
+        sched_mod.iniciar_scheduler()
+        job = sched_mod._scheduler.get_job("pronosticos")
+        self.assertEqual(job.misfire_grace_time, 3600)
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_scheduler_registra_exactamente_2_jobs(self) -> None:
+        # Red de seguridad: si alguien agrega un job sin querer en este
+        # bloque, el test lo detecta. Los bloques 4 y 5 van a subir este
+        # número (auditoría → 3, purgas → 4 o 5).
+        sched_mod.iniciar_scheduler()
+        self.assertEqual(len(sched_mod._scheduler.get_jobs()), 2)
 
 
 if __name__ == "__main__":
