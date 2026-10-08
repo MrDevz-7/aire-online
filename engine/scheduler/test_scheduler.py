@@ -1,5 +1,5 @@
 """
-Tests del arranque/parada del scheduler (M10 Bloques 2, 3 y 4).
+Tests del arranque/parada del scheduler (M10 Bloques 2, 3, 4 y 5).
 
 Verifican la guarda `SCHEDULER_ENABLED` y el registro de los jobs.
 No tocan red ni base.
@@ -142,15 +142,34 @@ class TestSchedulerHabilitado(unittest.TestCase):
         job = sched_mod._scheduler.get_job("auditoria")
         self.assertEqual(job.misfire_grace_time, 3600)
 
+    # ----- Bloque 5: jobs de purga ----------------------------------------
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_arranca_y_registra_jobs_purgas(self) -> None:
+        sched_mod.iniciar_scheduler()
+        ids = {j.id for j in sched_mod._scheduler.get_jobs()}
+        self.assertIn("purgas", ids)
+        self.assertIn("purgas_sesiones", ids)
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_jobs_purgas_tienen_trigger_cron_a_las_05_10(self) -> None:
+        sched_mod.iniciar_scheduler()
+        for job_id in ("purgas", "purgas_sesiones"):
+            job = sched_mod._scheduler.get_job(job_id)
+            self.assertIsNotNone(job, f"job {job_id} no encontrado")
+            campos = {f.name: str(f) for f in job.trigger.fields}
+            self.assertEqual(campos["hour"], "5", f"{job_id}: hour")
+            self.assertEqual(campos["minute"], "10", f"{job_id}: minute")
+
     # ----- Conteo global --------------------------------------------------
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
-    def test_scheduler_registra_exactamente_3_jobs(self) -> None:
-        # Red de seguridad: si alguien agrega un job sin querer en este
-        # bloque, el test lo detecta. El Bloque 5 va a subir este número
-        # (purgas → 4 o 5).
+    def test_scheduler_registra_exactamente_5_jobs(self) -> None:
+        # Red de seguridad: si alguien agrega un job sin querer, el test
+        # lo detecta. Total del módulo M10: 5 jobs (ingesta, pronosticos,
+        # auditoria, purgas, purgas_sesiones).
         sched_mod.iniciar_scheduler()
-        self.assertEqual(len(sched_mod._scheduler.get_jobs()), 3)
+        self.assertEqual(len(sched_mod._scheduler.get_jobs()), 5)
 
 
 if __name__ == "__main__":

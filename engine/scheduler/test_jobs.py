@@ -1,5 +1,5 @@
 """
-Tests de los jobs del scheduler (M10 Bloques 2, 3 y 4).
+Tests de los jobs del scheduler (M10 Bloques 2, 3, 4 y 5).
 
 Puros: mockean las funciones de servicio y la sesión de base. No arrancan
 el scheduler real, no tocan red, no tocan Postgres.
@@ -11,6 +11,7 @@ Se corren con:
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from scheduler.jobs import (
@@ -20,6 +21,8 @@ from scheduler.jobs import (
     job_auditoria,
     job_ingesta,
     job_pronosticos,
+    job_purgas,
+    job_purgas_sesiones,
 )
 
 
@@ -236,6 +239,99 @@ class TestJobAuditoria(unittest.TestCase):
             m_calc.return_value = MagicMock()
             job_auditoria()
         m_session.return_value.close.assert_called_once()
+
+
+class TestPurgaLecturas(unittest.TestCase):
+    """Tests del job de purga de lecturas (M10 Bloque 5, D90)."""
+
+    def test_exito_ejecuta_delete_y_commitea(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session:
+            db = MagicMock()
+            m_session.return_value = db
+            # El DELETE devuelve un rowcount.
+            db.execute.return_value.rowcount = 42
+
+            job_purgas()
+
+        # Se ejecutó UN delete (el de lecturas):
+        self.assertEqual(db.execute.call_count, 1)
+        db.commit.assert_called_once()
+        db.close.assert_called_once()
+        # No debe haber rollback en un caso de éxito:
+        db.rollback.assert_not_called()
+
+    def test_sin_filas_borradas_no_falla(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session:
+            db = MagicMock()
+            m_session.return_value = db
+            # rowcount = 0 (no había nada para borrar)
+            db.execute.return_value.rowcount = 0
+
+            job_purgas()  # no debe lanzar
+
+        db.commit.assert_called_once()
+        db.close.assert_called_once()
+
+    def test_falla_hace_rollback_y_no_propaga(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session:
+            db = MagicMock()
+            m_session.return_value = db
+            db.execute.side_effect = RuntimeError("db caída")
+
+            # No debe lanzar:
+            job_purgas()
+
+        # Se intentó hacer rollback:
+        db.rollback.assert_called_once()
+        # No se commiteó:
+        db.commit.assert_not_called()
+        # Igual se cerró:
+        db.close.assert_called_once()
+
+
+class TestPurgaSesiones(unittest.TestCase):
+    """Tests del job de purga de sesiones (M10 Bloque 5, D91)."""
+
+    def test_exito_dos_deletes_y_commit(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session:
+            db = MagicMock()
+            m_session.return_value = db
+            # El primer execute (vencidas) devuelve 3; el segundo (revocadas) devuelve 5.
+            db.execute.side_effect = [
+                MagicMock(rowcount=3),
+                MagicMock(rowcount=5),
+            ]
+
+            job_purgas_sesiones()
+
+        # Se hicieron DOS deletes (vencidas + revocadas):
+        self.assertEqual(db.execute.call_count, 2)
+        db.commit.assert_called_once()
+        db.close.assert_called_once()
+        db.rollback.assert_not_called()
+
+    def test_sin_filas_borradas_no_falla(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session:
+            db = MagicMock()
+            m_session.return_value = db
+            db.execute.side_effect = [
+                MagicMock(rowcount=0),
+                MagicMock(rowcount=0),
+            ]
+            job_purgas_sesiones()
+        db.commit.assert_called_once()
+
+    def test_falla_hace_rollback_y_no_propaga(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session:
+            db = MagicMock()
+            m_session.return_value = db
+            db.execute.side_effect = RuntimeError("db caída")
+
+            job_purgas_sesiones()  # no debe lanzar
+
+        db.rollback.assert_called_once()
+        db.commit.assert_not_called()
+        db.close.assert_called_once()
 
 
 if __name__ == "__main__":
