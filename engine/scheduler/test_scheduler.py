@@ -1,5 +1,5 @@
 """
-Tests del arranque/parada del scheduler (M10 Bloques 2 y 3).
+Tests del arranque/parada del scheduler (M10 Bloques 2, 3 y 4).
 
 Verifican la guarda `SCHEDULER_ENABLED` y el registro de los jobs.
 No tocan red ni base.
@@ -117,13 +117,40 @@ class TestSchedulerHabilitado(unittest.TestCase):
         job = sched_mod._scheduler.get_job("pronosticos")
         self.assertEqual(job.misfire_grace_time, 3600)
 
+    # ----- Bloque 4: job de auditoría -------------------------------------
+
     @patch.object(settings, "SCHEDULER_ENABLED", True)
-    def test_scheduler_registra_exactamente_2_jobs(self) -> None:
-        # Red de seguridad: si alguien agrega un job sin querer en este
-        # bloque, el test lo detecta. Los bloques 4 y 5 van a subir este
-        # número (auditoría → 3, purgas → 4 o 5).
+    def test_arranca_y_registra_job_auditoria(self) -> None:
         sched_mod.iniciar_scheduler()
-        self.assertEqual(len(sched_mod._scheduler.get_jobs()), 2)
+        ids = {j.id for j in sched_mod._scheduler.get_jobs()}
+        self.assertIn("auditoria", ids)
+        self.assertIn("ingesta", ids)
+        self.assertIn("pronosticos", ids)
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_job_auditoria_tiene_trigger_cron_a_las_04_40(self) -> None:
+        sched_mod.iniciar_scheduler()
+        job = sched_mod._scheduler.get_job("auditoria")
+        self.assertIsNotNone(job)
+        campos = {f.name: str(f) for f in job.trigger.fields}
+        self.assertEqual(campos["hour"], "4")
+        self.assertEqual(campos["minute"], "40")
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_job_auditoria_tiene_misfire_grace_time_1h(self) -> None:
+        sched_mod.iniciar_scheduler()
+        job = sched_mod._scheduler.get_job("auditoria")
+        self.assertEqual(job.misfire_grace_time, 3600)
+
+    # ----- Conteo global --------------------------------------------------
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_scheduler_registra_exactamente_3_jobs(self) -> None:
+        # Red de seguridad: si alguien agrega un job sin querer en este
+        # bloque, el test lo detecta. El Bloque 5 va a subir este número
+        # (purgas → 4 o 5).
+        sched_mod.iniciar_scheduler()
+        self.assertEqual(len(sched_mod._scheduler.get_jobs()), 3)
 
 
 if __name__ == "__main__":

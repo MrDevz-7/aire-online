@@ -22,8 +22,9 @@ Patrón de cada job real:
 
 Bloques implementados:
     - Bloque 2: job_ingesta (cada hora al minuto :05).
-    - Bloque 3 (este): job_pronosticos (04:10, D89).
-    - Bloques 4 y 5: auditoría diaria y purgas.
+    - Bloque 3: job_pronosticos (04:10, D89).
+    - Bloque 4 (este): job_auditoria (04:40, D89).
+    - Bloque 5: purgas.
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.orm import Session
 
 from database.session import SessionLocal
+from services.auditoria import calcular_auditorias
 from services.ingestion import (
     ResumenIngestion,
     ejecutar_aqicn,
@@ -191,6 +193,41 @@ def job_pronosticos() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bloque 4 — Job de auditoría diaria (D66, D69, D89)
+# ---------------------------------------------------------------------------
+def job_auditoria() -> None:
+    """Wrapper del job de auditoría diaria.
+
+    `calcular_auditorias` resuelve las auditorías pendientes cuyo día
+    objetivo ya terminó (hora local Colombia). Es idempotente: la
+    segunda corrida seguida no toca nada, porque las filas ya procesadas
+    dejaron de ser 'pendiente'. Correr esto todos los días es lo que
+    hace que D69 se cumpla: la cifra pública de error se acumula sola,
+    sin que nadie tenga que acordarse de dispararla a mano.
+
+    Nunca lanza: el scheduler no tiene a quién avisarle.
+    """
+    db = SessionLocal()
+    try:
+        r = calcular_auditorias(db)
+        logger.info(
+            "[scheduler] auditoría OK: resueltas=%d, sin_datos=%d, "
+            "no_auditables=%d, todavia_no_vencen=%d, "
+            "horas_insuficientes=%d, pendientes_antes=%d",
+            r.resueltas,
+            r.sin_datos,
+            r.no_auditables,
+            r.todavia_no_vencen,
+            r.pendientes_por_horas_insuficientes,
+            r.pendientes_antes,
+        )
+    except Exception:
+        logger.exception("[scheduler] auditoría falló")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Registro de jobs
 # ---------------------------------------------------------------------------
 def registrar_jobs(sched: BackgroundScheduler) -> None:
@@ -203,6 +240,10 @@ def registrar_jobs(sched: BackgroundScheduler) -> None:
     Programación vigente (D89, hora local `America/Bogota`):
         - ingesta:      cada hora, minuto :05
         - pronósticos:  04:10
+        - auditoría:    04:40
+
+    El orden de la madrugada es pronosticos -> auditoria: la auditoría
+    audita el día que YA CERRÓ, no el que se acaba de capturar.
     """
     sched.add_job(
         job_ingesta,
@@ -227,5 +268,16 @@ def registrar_jobs(sched: BackgroundScheduler) -> None:
         # 1 hora de gracia: si el proceso se reinicia y la corrida de las
         # 04:10 se atrasa menos de 60 min, se recupera; si más, se saltea
         # y espera al día siguiente.
+        misfire_grace_time=3600,
+    )
+    sched.add_job(
+        job_auditoria,
+        trigger="cron",
+        hour=4,
+        minute=40,
+        timezone=ZONA_HORARIA,
+        id="auditoria",
+        replace_existing=True,
+        max_instances=1,
         misfire_grace_time=3600,
     )

@@ -1,5 +1,5 @@
 """
-Tests de los jobs del scheduler (M10 Bloques 2 y 3).
+Tests de los jobs del scheduler (M10 Bloques 2, 3 y 4).
 
 Puros: mockean las funciones de servicio y la sesión de base. No arrancan
 el scheduler real, no tocan red, no tocan Postgres.
@@ -17,6 +17,7 @@ from scheduler.jobs import (
     _ejecutar_una_fuente,
     _fuentes_ingesta,
     ejecutar_ingesta,
+    job_auditoria,
     job_ingesta,
     job_pronosticos,
 )
@@ -191,6 +192,49 @@ class TestJobPronosticos(unittest.TestCase):
             m_session.return_value = MagicMock()
             m_capturar.return_value = MagicMock()
             job_pronosticos()
+        m_session.return_value.close.assert_called_once()
+
+
+class TestJobAuditoria(unittest.TestCase):
+    """Tests del job de auditoría (M10 Bloque 4)."""
+
+    def test_exito_loguea_sin_error(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.calcular_auditorias") as m_calc:
+            m_session.return_value = MagicMock()
+            m_resumen = MagicMock()
+            m_resumen.resueltas = 10
+            m_resumen.sin_datos = 2
+            m_resumen.no_auditables = 3
+            m_resumen.todavia_no_vencen = 5
+            m_resumen.pendientes_por_horas_insuficientes = 1
+            m_resumen.pendientes_antes = 21
+            m_calc.return_value = m_resumen
+
+            # No debe lanzar:
+            job_auditoria()
+
+        m_calc.assert_called_once_with(m_session.return_value)
+        m_session.return_value.close.assert_called_once()
+
+    def test_falla_no_propaga(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.calcular_auditorias") as m_calc:
+            m_session.return_value = MagicMock()
+            m_calc.side_effect = RuntimeError("db caída")
+
+            # No debe lanzar: el scheduler no debe morir por esto.
+            job_auditoria()
+
+        # Y la sesión igual se cerró (finally):
+        m_session.return_value.close.assert_called_once()
+
+    def test_cierra_sesion_aunque_exito(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.calcular_auditorias") as m_calc:
+            m_session.return_value = MagicMock()
+            m_calc.return_value = MagicMock()
+            job_auditoria()
         m_session.return_value.close.assert_called_once()
 
 

@@ -8,17 +8,15 @@ Colombia, y lo guarda junto con las métricas de error. La comparación se
 hace en la ESCALA DE LA LECTURA REAL (D64).
 
 Tres filtros antes de calcular, cada uno con una consecuencia distinta:
-
   1. D54 (implícito en la captura): la fila existe solo si
      fecha_objetivo > fecha_captura. Acá, además, se exige que
      fecha_objetivo < hoy_local: si no, todavía no venció.
-
   2. D66 (día completo): el día local debe tener lecturas reales en al
-     menos MIN_HORAS_CON_LECTURA_AUDITORIA horas distintas (buckets
-     horarios como D42). Si no, la fila queda 'pendiente' (no se calcula
-     con datos parciales). Esto corrige el criterio previo de M5b, que
-     resolvía el día con >= 1 lectura.
-
+     menos `settings.MIN_HORAS_CON_LECTURA_AUDITORIA` horas distintas
+     (buckets horarios como D42). Si no, la fila queda 'pendiente' (no
+     se calcula con datos parciales). Esto corrige el criterio previo
+     de M5b, que resolvía el día con >= 1 lectura. El mínimo era una
+     constante hardcodeada hasta M10; ahora es configurable (D66).
   3. D64 (escala común): el contaminante debe ser auditable. Hoy son
      auditables `aqi` (directo: us_aqi vs aqi), `pm25` y `pm10`
      (convertidos con services/aqi_escala.convertir_a_aqi). Los gases
@@ -41,6 +39,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from database.config import settings
 from database.models import AuditoriaPronostico, Lectura, Pronostico, utcnow
 from services.aqi_escala import convertir_a_aqi
 
@@ -48,14 +47,6 @@ logger = logging.getLogger(__name__)
 
 # Colombia es UTC-5 fijo todo el año (sin horario de verano).
 OFFSET_COLOMBIA = timezone(timedelta(hours=-5))
-
-# D66: mínimo de horas distintas con al menos una lectura real para que el
-# día cuente como completo. 16 ~ 2/3 de 24. Es un punto de partida
-# configurable: se ajusta cuando haya datos reales que lo justifiquen.
-# Bajarlo (por ejemplo a 3) es válido para la verificación manual del
-# Bloque 6: las filas resultantes quedan identificables por
-# `horas_con_lectura`, y no son cifra publicable.
-MIN_HORAS_CON_LECTURA_AUDITORIA = 16
 
 # Fuente de pronóstico que este módulo audita. Filtro explícito (aunque
 # hoy sea la única): si mañana entra otra fuente, no queremos que se cuele
@@ -74,6 +65,7 @@ def _fecha_local_colombia(instante_utc: datetime) -> date:
 
 def _rango_utc_dia_local(fecha_local: date) -> tuple[datetime, datetime]:
     """El día local Colombia [00:00, 24:00) traducido a un rango UTC.
+
     Half-open: [inicio, fin). Así una lectura exactamente a las 00:00
     locales del día siguiente cae en el día siguiente, no en este.
     """
@@ -188,7 +180,6 @@ def _resolver_una(
         auditoria.estado = "no_auditable"
         auditoria.resuelta_en = ahora
         return "no_auditable"
-
     # 2. ¿Hay datos suficientes? D66.
     valor_real, n_lecturas, horas = _promedio_y_horas_dia_local(
         db, pronostico.estacion_id, pronostico.contaminante, pronostico.fecha_objetivo
@@ -203,12 +194,16 @@ def _resolver_una(
     # caso: no se calcula con datos parciales.
     auditoria.horas_con_lectura = horas
     auditoria.n_lecturas_real = n_lecturas
-    if horas < MIN_HORAS_CON_LECTURA_AUDITORIA:
+    # D66 (M10 Bloque 4): el mínimo de horas es configurable vía
+    # `settings.MIN_HORAS_CON_LECTURA_AUDITORIA`. Se lee EN TIEMPO DE
+    # EJECUCIÓN (no se captura al importar el módulo) para que un test
+    # pueda parchearlo y verificar el cambio de comportamiento sin
+    # reiniciar el proceso.
+    if horas < settings.MIN_HORAS_CON_LECTURA_AUDITORIA:
         # Queda pendiente: se recalculará en una corrida futura si llegan
         # más lecturas (raro una vez cerrado el día, pero no imposible:
         # una ingesta tardía puede rellenar huecos).
         return "horas_insuficientes"
-
     # 3. Llevar el pronóstico a la escala común y comparar.
     if pronostico.valor_promedio is None:
         # Sin promedio pronosticado no hay nada que comparar: se guarda
@@ -221,7 +216,6 @@ def _resolver_una(
         auditoria.estado = "resuelta"
         auditoria.resuelta_en = ahora
         return "resuelta"
-
     valor_pronosticado_en_aqi = _a_escala_comun(
         pronostico.contaminante, pronostico.valor_promedio, pronostico.unidad
     )
@@ -232,7 +226,6 @@ def _resolver_una(
         auditoria.estado = "no_auditable"
         auditoria.resuelta_en = ahora
         return "no_auditable"
-
     error_abs = abs(valor_pronosticado_en_aqi - valor_real)
     auditoria.valor_real = valor_real
     auditoria.error_abs = error_abs
@@ -266,7 +259,6 @@ def calcular_auditorias(db: Session, *, ahora: datetime | None = None) -> Resume
         )
     ).all()
     resumen = ResumenAuditoria(pendientes_antes=len(filas))
-
     for auditoria, pronostico in filas:
         if pronostico.fecha_objetivo >= hoy_local:
             resumen.todavia_no_vencen += 1
@@ -283,7 +275,6 @@ def calcular_auditorias(db: Session, *, ahora: datetime | None = None) -> Resume
             )
         elif resultado == "horas_insuficientes":
             resumen.pendientes_por_horas_insuficientes += 1
-
     db.commit()
     logger.info("Auditorías: %s", resumen.a_dict())
     return resumen

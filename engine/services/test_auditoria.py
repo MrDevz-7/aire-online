@@ -1,5 +1,5 @@
 """
-Tests de la auditoría adaptada a Open-Meteo (M5c Bloque 5.3).
+Tests de la auditoría adaptada a Open-Meteo (M5c Bloque 5.3, M10 Bloque 4).
 
 Se corren con:
     cd engine
@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import unittest
 from datetime import date, datetime, time, timedelta, timezone
+from unittest.mock import patch
 
 from sqlalchemy import delete, select
 
+from database.config import settings
 from database.models import (
     AuditoriaPronostico,
     Estacion,
@@ -38,7 +40,6 @@ from database.models import (
 )
 from database.session import SessionLocal
 from services.auditoria import (
-    MIN_HORAS_CON_LECTURA_AUDITORIA,
     OFFSET_COLOMBIA,
     calcular_auditorias,
 )
@@ -239,10 +240,12 @@ class TestHorasInsuficientes(_BaseTestAuditoria):
         self.assertIsNone(a.valor_real)
 
     def test_justo_en_el_minimo_se_resuelve(self) -> None:
-        """El criterio es `>= MIN_HORAS...`. Justo en el umbral, resuelve."""
+        """El criterio es `>= settings.MIN_HORAS...`. Justo en el umbral,
+        resuelve. Usa el valor de settings (M10: ya no es constante
+        hardcodeada)."""
         est = self.crear_estacion("horas_justas")
         self.crear_lecturas_horarias(
-            est.id, "aqi", 100.0, n_horas=MIN_HORAS_CON_LECTURA_AUDITORIA
+            est.id, "aqi", 100.0, n_horas=settings.MIN_HORAS_CON_LECTURA_AUDITORIA
         )
         _, aud_id = self.crear_pronostico_y_auditoria(
             est.id, "aqi", 80.0, unidad="AQI"
@@ -250,7 +253,45 @@ class TestHorasInsuficientes(_BaseTestAuditoria):
         calcular_auditorias(self.db, ahora=HOY_FIJO)
         a = self.leer_auditoria(aud_id)
         self.assertEqual(a.estado, "resuelta")
-        self.assertEqual(a.horas_con_lectura, MIN_HORAS_CON_LECTURA_AUDITORIA)
+        self.assertEqual(
+            a.horas_con_lectura, settings.MIN_HORAS_CON_LECTURA_AUDITORIA
+        )
+
+
+class TestMinimoConfigurable(_BaseTestAuditoria):
+    """D66 (M10 Bloque 4): el mínimo de horas con lectura es configurable
+    vía `settings.MIN_HORAS_CON_LECTURA_AUDITORIA`. Cambiarlo cambia el
+    comportamiento de `calcular_auditorias` sin tocar código de auditoría."""
+
+    def test_minimo_bajo_resuelve_con_pocas_horas(self) -> None:
+        # Con el default (16) este caso quedaría pendiente; con el mínimo
+        # bajado a 5, se resuelve.
+        est = self.crear_estacion("min_bajo")
+        self.crear_lecturas_horarias(est.id, "aqi", 100.0, n_horas=5)
+        _, aud_id = self.crear_pronostico_y_auditoria(
+            est.id, "aqi", 80.0, unidad="AQI"
+        )
+        with patch.object(settings, "MIN_HORAS_CON_LECTURA_AUDITORIA", 5):
+            calcular_auditorias(self.db, ahora=HOY_FIJO)
+        a = self.leer_auditoria(aud_id)
+        self.assertEqual(a.estado, "resuelta")
+        self.assertEqual(a.horas_con_lectura, 5)
+        self.assertAlmostEqual(a.error_abs or 0.0, 20.0, places=6)
+
+    def test_minimo_alto_deja_pendiente_con_muchas_horas(self) -> None:
+        # Con el default (16) este caso se resolvería; con el mínimo
+        # subido a 24, queda pendiente.
+        est = self.crear_estacion("min_alto")
+        self.crear_lecturas_horarias(est.id, "aqi", 100.0, n_horas=20)
+        _, aud_id = self.crear_pronostico_y_auditoria(
+            est.id, "aqi", 80.0, unidad="AQI"
+        )
+        with patch.object(settings, "MIN_HORAS_CON_LECTURA_AUDITORIA", 24):
+            calcular_auditorias(self.db, ahora=HOY_FIJO)
+        a = self.leer_auditoria(aud_id)
+        self.assertEqual(a.estado, "pendiente")
+        self.assertEqual(a.horas_con_lectura, 20)
+        self.assertIsNone(a.error_abs)
 
 
 class TestContaminanteNoAuditable(_BaseTestAuditoria):
@@ -315,7 +356,6 @@ class TestIdempotencia(_BaseTestAuditoria):
         self.assertEqual(a.estado, "resuelta")
         error_primera = a.error_abs
         self.assertAlmostEqual(error_primera or 0.0, 20.0, places=6)
-
         # Segunda corrida: no debe tocar la fila ya resuelta.
         calcular_auditorias(self.db, ahora=HOY_FIJO)
         a = self.leer_auditoria(aud_id)
