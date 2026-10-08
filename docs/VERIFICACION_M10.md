@@ -1,11 +1,11 @@
-# Verificación de punta a punta — M10
+# Verificación de punta a punta — M10 y M10.1
 
 Documento reproducible: si otra persona sigue estos pasos en una máquina
 con Docker Desktop, git y PowerShell, obtiene los mismos resultados.
 
-**Alcance:** verifica el scheduler embebido (D87), los jobs de ingesta
-repartida, captura de pronósticos, auditoría y purgas, la retención de
-lecturas (D90) y la purga de sesiones (D91).
+**Alcance:** verifica el scheduler embebido (D87), los 7 jobs diarios
+(ingesta, reconciliación, pronósticos, auditoría, reportes, purgas),
+la retención de lecturas (D90) y la purga de sesiones (D91).
 
 **Requiere:**
 - Docker Desktop corriendo.
@@ -48,24 +48,44 @@ docker compose ps
 docker compose logs engine | Select-String "Scheduler arrancado|id="
 ```
 
-Esperado:
+Esperado (7 jobs tras M10.1):
 
 ```
-INFO:scheduler.scheduler:Scheduler arrancado con 5 job(s):
-INFO:scheduler.scheduler:  - id=auditoria | próximo disparo: ...04:40:00-05:00 | trigger: cron[hour='4', minute='40']
+INFO:scheduler.scheduler:Scheduler arrancado con 7 job(s):
+INFO:scheduler.scheduler:  - id=reconciliacion | próximo disparo: ...03:40:00-05:00 | trigger: cron[hour='3', minute='40']
 INFO:scheduler.scheduler:  - id=ingesta | próximo disparo: ...:05:00-05:00 | trigger: cron[hour='*', minute='5']
 INFO:scheduler.scheduler:  - id=pronosticos | próximo disparo: ...04:10:00-05:00 | trigger: cron[hour='4', minute='10']
-INFO:scheduler.scheduler:  - id=purgas | próximo disparo: ...05:10:00-05:00 | trigger: cron[hour='5', minute='10']
-INFO:scheduler.scheduler:  - id=purgas_sesiones | próximo disparo: ...05:10:00-05:00 | trigger: cron[hour='5', minute='10']
+INFO:scheduler.scheduler:  - id=auditoria | próximo disparo: ...04:40:00-05:00 | trigger: cron[hour='4', minute='40']
+INFO:scheduler.scheduler:  - id=reportes | próximo disparo: ...05:00:00-05:00 | trigger: cron[hour='5', minute='0']
+INFO:scheduler.scheduler:  - id=purgas | próximo disparo: ...05:30:00-05:00 | trigger: cron[hour='5', minute='30']
+INFO:scheduler.scheduler:  - id=purgas_sesiones | próximo disparo: ...05:30:00-05:00 | trigger: cron[hour='5', minute='30']
 ```
+
+### Horario completo de los 7 jobs (hora local America/Bogota)
+
+| Hora | Job | Frecuencia | Qué hace |
+|---|---|---|---|
+| `03:40` | `reconciliacion` | 1×día | Empareja estaciones entre fuentes y recalcula comparaciones |
+| `:05` cada hora | `ingesta` | 24×día | Ingesta de OpenAQ, AQICN, IBOCA, SIATA |
+| `04:10` | `pronosticos` | 1×día | Captura de pronósticos de Open-Meteo (idempotente, D62) |
+| `04:40` | `auditoria` | 1×día | Resuelve auditorías pendientes cuyo día ya cerró |
+| `05:00` | `reportes` | 1×día | Genera reportes en lenguaje natural (respeta D73) |
+| `05:30` | `purgas` | 1×día | Borra lecturas fuera de retención (D90) |
+| `05:30` | `purgas_sesiones` | 1×día | Borra sesiones de refresh vencidas y revocadas (D91) |
+
+El orden de la madrugada es: `reconciliacion` → `pronosticos` →
+`auditoria` → `reportes` → `purgas`. Cada job depende de que el
+anterior haya corrido (ver "El orden de la madrugada no es
+arbitrario" en `docs/CONCEPTOS.md`, bloque M10.1).
 
 ---
 
 ## 2. Forzar cada job sin esperar al horario programado
 
 Todos los jobs tienen su equivalente **manual** en `/internal/*`, que
-llama a la MISMA función de servicio (D88). Es la forma de disparar el
-trabajo ahora, sin esperar al cron.
+llama a la MISMA función de servicio (D88). Las purgas son la excepción:
+no tienen endpoint (son destructivas y no deben dispararse por HTTP), se
+corren con `docker compose exec` (ver sección 7).
 
 **Ojo con el `X-Internal-Token` (D79):** con `INTERNAL_API_TOKEN`
 configurado en `engine/.env`, todas las rutas `/internal/*` exigen esa
@@ -78,10 +98,12 @@ curl.exe -s -X POST -H "X-Internal-Token: $tok" <URL>
 
 | Job | Disparo manual |
 |---|---|
+| reconciliación (03:40) | `POST /internal/reconciliacion/emparejar` y `POST /internal/reconciliacion/comparar` (en ese orden) |
 | ingesta (cada hora :05) | `POST /internal/ingest/{openaq,aqicn,iboca,siata}` |
 | pronósticos (04:10) | `POST /internal/pronosticos/capturar` |
 | auditoría (04:40) | `POST /internal/audit/run` |
-| purgas | (no tiene endpoint — ver sección 7) |
+| reportes (05:00) | `POST /internal/reportes/generar` (acepta `?forzar_plantilla=true` para evitar gastar cuota) |
+| purgas | ver sección 7 |
 
 ---
 
@@ -93,26 +115,18 @@ Cada job loguea con el prefijo `[scheduler]`:
 docker compose logs engine | Select-String "\[scheduler\]"
 ```
 
-Ejemplo de una corrida de ingesta OK:
+Ejemplos esperados por job:
 
 ```
-INFO:scheduler.jobs:[scheduler] ingesta openaq OK: 5 estaciones nuevas, 30 lecturas insertadas, 0 duplicadas, 0 invalidas
-INFO:scheduler.jobs:[scheduler] ingesta aqicn OK: ...
-INFO:scheduler.jobs:[scheduler] ingesta iboca OK: ...
-INFO:scheduler.jobs:[scheduler] ingesta siata OK: ...
+INFO:scheduler.jobs:[scheduler] reconciliación emparejar OK: evaluados=N, nuevos=N, actualizados=0, sin_cambios=0
+INFO:scheduler.jobs:[scheduler] reconciliación comparar OK: evaluadas=N, nuevas=N, actualizadas=0, omitidas=N
 INFO:scheduler.jobs:[scheduler] ingesta completa: 4/4 fuentes OK (openaq, aqicn, iboca, siata); fallidas: ninguna
+INFO:scheduler.jobs:[scheduler] captura de pronósticos OK: insertados=N, ya_existian=N, auditorías_creadas=N, requests=2, por_horizonte={...}
+INFO:scheduler.jobs:[scheduler] auditoría OK: resueltas=N, sin_datos=N, no_auditables=N, todavia_no_vencen=N, horas_insuficientes=N, pendientes_antes=N
+INFO:scheduler.jobs:[scheduler] reportes OK: totales=N, nuevos=N, reutilizados=N, por_origen={...}, por_motivo_fallback={...}, llamadas_ia_totales=N
+INFO:scheduler.jobs:[scheduler] purga de lecturas OK: N filas borradas (medido_en < ..., retención 60 días)
+INFO:scheduler.jobs:[scheduler] purga de sesiones OK: N vencidas + M revocadas (gracia 24 h) = X filas borradas
 ```
-
-Ejemplo de una captura de pronósticos OK:
-
-```
-INFO:scheduler.jobs:[scheduler] captura de pronósticos OK: insertados=324, ya_existian=0, auditorías_creadas=324, requests=2, por_horizonte={1: 108, 2: 108, 3: 108}
-```
-
-**Nota:** cuando el disparo es manual (por `/internal/*`), el log del
-servicio de dominio también aparece (`M5c captura: {...}`), pero el log
-con el prefijo `[scheduler]` solo aparece cuando el job programado corre
-por su cuenta.
 
 ---
 
@@ -122,16 +136,16 @@ por su cuenta.
 docker compose exec engine python -m unittest discover -v 2>&1 | Select-String "^(Ran|OK|FAILED)"
 ```
 
-Resultado al cierre de M10: **`Ran 268 tests in 1.798s — OK`**.
+Resultado al cierre de M10.1: **`Ran 283 tests in ...s — OK`**.
 
-Distribución aproximada por módulo:
-- `scheduler.test_jobs` + `scheduler.test_scheduler`: 38 tests (nuevos de M10).
+Distribución por módulo:
+- `scheduler.test_jobs` + `scheduler.test_scheduler`: **53 tests**.
 - `services.test_auditoria`: 11 tests (2 nuevos de M10 por D66 configurable).
-- Resto: los 228 tests de M0–M9, intactos.
+- Resto: 219 tests de M0–M9, intactos.
 
 ---
 
-## 5. Verificación del horizonte de Open-Meteo (Bloque 3)
+## 5. Verificación del horizonte de Open-Meteo
 
 **Objetivo:** confirmar que la cifra de "~3 días" de horizonte medido que
 ya circula en los docs públicos se sostiene sin importar la hora del día
@@ -153,56 +167,27 @@ curl.exe -s -X POST -H "X-Internal-Token: $tok" http://localhost:8000/internal/p
 **Corrida 1** — 2026-10-07, ~06:45 hora local (-05):
 
 ```
-estaciones_activas          : 28
-pares_estacion_contaminante : 108
-coords_unicas               : 28
-requests                    : 2
-ubicaciones_devueltas       : 28
-pronosticos_candidatos      : 324
-pronosticos_insertados      : 324
-pronosticos_ya_existian     : 0
-auditorias_creadas          : 324
-por_horizonte               : {1: 108, 2: 108, 3: 108}
-fallos                      : {}
-abortada                    : (vacío)
+por_horizonte = {1: 108, 2: 108, 3: 108}  →  horizonte 3 días
 ```
 
 **Corrida 2** — 2026-10-08, 04:24:37 hora local (-05):
 
 ```
-estaciones_activas          : 28
-pares_estacion_contaminante : 108
-coords_unicas               : 28
-requests                    : 2
-ubicaciones_devueltas       : 28
-pronosticos_candidatos      : 324
-pronosticos_insertados      : 0
-pronosticos_ya_existian     : 324
-auditorias_creadas          : 0
-por_horizonte               : {1: 108, 2: 108, 3: 108}
-fallos                      : {}
-abortada                    : (vacío)
+por_horizonte = {1: 108, 2: 108, 3: 108}  →  horizonte 3 días
+insertados=0, ya_existian=324 (idempotencia D62 confirmada en real)
 ```
 
 ### Conclusión
 
-**Horizonte máximo medido en ambas corridas: 3 días.** Mismo resultado
-con 22 h de separación y a horas del día completamente distintas (una al
-amanecer, otra de madrugada antes del amanecer). Se confirma la cifra de
-**~3 días** que ya circula en los docs públicos: **no hay que cambiar
-ningún texto público** (D33).
-
-La corrida 2 además valida la idempotencia de D62 en producción real:
-`pronosticos_insertados = 0` y `pronosticos_ya_existian = 324`
-significan que la captura del 2026-10-08 ya existía (probablemente
-insertada por el job automático a las 04:10 o por una corrida previa),
-y la corrida 2 no la duplicó ni la pisó.
+**Horizonte máximo: 3 días, en ambas corridas.** La cifra que circula en
+los docs públicos está confirmada. **No hay que cambiar ningún texto**
+(D33).
 
 ---
 
 ## 6. Tamaño de la base (referencia para D90)
 
-Al cierre de M10, con ~1077 lecturas acumuladas:
+Con ~1077 lecturas acumuladas al cierre de M10 (D90 sigue vigente):
 
 ```powershell
 docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT pg_size_pretty(pg_database_size('aire_online')) AS tamano_total;"
@@ -210,145 +195,92 @@ docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT pg_si
 docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT COUNT(*) AS total_lecturas FROM lecturas;"
 ```
 
-Resultado:
-
-| Métrica | Valor |
+| Métrica | Valor (cierre M10) |
 |---|---|
 | Tamaño total de la base | **9582 kB** (~9.4 MB) |
-| Tamaño de la tabla `lecturas` (con índices) | **416 kB** |
+| Tamaño de la tabla `lecturas` | **416 kB** |
 | Filas en `lecturas` | **1077** |
-| Bytes por fila (incluye índices) | ~395 B |
+| Bytes por fila (con índices) | ~395 B |
 
-### Proyección para D90
-
-Con las 4 fuentes ingiriendo cada hora (24 corridas/día) y un promedio
-observado de ~300–400 lecturas nuevas por corrida (según los logs de
-`ejecutar_ingesta`), el crecimiento esperado es de ~7000–10000 filas/día.
-Con `RETENCION_LECTURAS_DIAS=60`:
-
-- **~450,000–600,000 filas** en régimen estable.
-- **~180–240 MB** solo en `lecturas` (a ~400 B/fila).
-- Sumando índices secundarios, auditorías, comparaciones, reportes y
-  usuarios, el total proyectado se acerca a **300–400 MB**.
-
-El plan gratuito de Supabase tiene **500 MB** de base de datos
-compartidos (verificado por el PM en documentación pública, 2026-10-07).
-La proyección entra en el límite con margen, pero **no por mucho**.
-Cuando el scheduler lleve corriendo un tiempo real, vale la pena
-**revisar el tamaño real** contra esta proyección y, si hace falta,
-**bajar `RETENCION_LECTURAS_DIAS`** (a 30) o **subir el intervalo de
-ingesta** (por ejemplo, cada 2 h en lugar de cada hora, que igual
-cumple D66 con margen).
-
-**PENDIENTE:** revisar el tamaño real de la base después de que el
-scheduler corra durante ≥ 2 semanas con las 4 fuentes activas. No
-bloquea el cierre de M10, es una decisión futura con datos reales.
+Proyección a régimen estable (retención 60 días, ~7000–10000
+filas/día): **~300–400 MB**, dentro del límite de 500 MB de Supabase
+Free pero sin mucho margen. **Pendiente revisar tamaño real después de
+≥ 2 semanas con el scheduler corriendo**; si crece más de lo previsto,
+bajar `RETENCION_LECTURAS_DIAS` o subir el intervalo de ingesta.
 
 ---
 
-## 7. Purgas (Bloque 5, D90/D91)
+## 7. Purgas (D90/D91)
 
-Las purgas no tienen endpoint `/internal/*` (a propósito: son
-operaciones destructivas, no queremos que se disparen por HTTP con un
-token robado). Se ejecutan solo desde el scheduler embebido. Para
-verificarlas a mano:
+Las purgas no tienen endpoint `/internal/*` (son destructivas, no se
+disparan por HTTP con un token). Se ejecutan solo desde el scheduler
+embebido. Para verificarlas a mano:
 
 ### 7.1 Purga de lecturas
 
-**Contar antes:**
-
 ```powershell
+# Antes:
 docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT COUNT(*) AS total FROM lecturas;"
 docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT COUNT(*) AS candidatas FROM lecturas WHERE medido_en < NOW() - INTERVAL '60 days';"
-```
 
-**Insertar un marcador** (fila con `valor` y `unidad` identificables,
-fecha de hace 1 año):
-
-```powershell
+# Marcador (fila con valor/unidad identificables, fecha de 1 año):
 docker compose exec postgres psql -U aire_online -d aire_online -c "INSERT INTO lecturas (estacion_id, contaminante, valor, unidad, medido_en, capturado_en) SELECT id, 'pm25', 9999.99, 'TEST_M10', NOW() - INTERVAL '365 days', NOW() FROM estaciones LIMIT 1;"
-```
 
-**Disparar la purga** (con `basicConfig` para ver los logs del job):
-
-```powershell
+# Disparar (con basicConfig para ver el log del job):
 docker compose exec engine python -c "import logging; logging.basicConfig(level=logging.INFO); from scheduler.jobs import job_purgas; job_purgas()"
-```
 
-**Verificar después:**
-
-```powershell
+# Después:
 docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT COUNT(*) AS marcador FROM lecturas WHERE valor = 9999.99;"
 docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT COUNT(*) AS fuera_de_retencion FROM lecturas WHERE medido_en < NOW() - INTERVAL '60 days';"
-docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT COUNT(*) AS total FROM lecturas;"
 ```
 
-**Esperado:** `marcador = 0`, `fuera_de_retencion = 0`, `total = total_antes - 1 - (filas viejas reales que hubiera)`.
+**Esperado:** `marcador = 0`, `fuera_de_retencion = 0`.
 
 ### 7.2 Purga de sesiones
 
 ```powershell
-# Antes:
 docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT COUNT(*) FILTER (WHERE expira_en < NOW()) AS vencidas, COUNT(*) FILTER (WHERE revocada_en IS NOT NULL AND revocada_en < NOW() - INTERVAL '24 hours') AS revocadas_viejas FROM sesiones_refresh;"
 
-# Disparar:
 docker compose exec engine python -c "import logging; logging.basicConfig(level=logging.INFO); from scheduler.jobs import job_purgas_sesiones; job_purgas_sesiones()"
 
-# Después (los dos contadores tienen que quedar en 0):
 docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT COUNT(*) FILTER (WHERE expira_en < NOW()) AS vencidas, COUNT(*) FILTER (WHERE revocada_en IS NOT NULL AND revocada_en < NOW() - INTERVAL '24 hours') AS revocadas_viejas FROM sesiones_refresh;"
 ```
 
-### Resultado observado en la corrida real (2026-10-08)
-
-- **Lecturas:** `total_antes = 1078`, `candidatas = 1` (una lectura real de
-  OpenAQ con `medido_en = 2025-01-13`), `sobrevivientes = 1077`. Se
-  insertó el marcador, se corrió la purga: **2 filas borradas** (el
-  marcador + la fila vieja real), `total_despues = 1077`,
-  `fuera_de_retencion = 0`.
-- **Sesiones:** `vencidas = 0`, `revocadas_viejas = 4` antes; `0` y `0`
-  después. Total de sesiones bajó de 6 a 2. Las 4 revocadas fuera del
-  período de gracia (24 h) se borraron; las 2 dentro de gracia se
-  conservaron.
+**Esperado:** los dos contadores quedan en 0 después.
 
 ---
 
 ## 8. Hallazgo: lectura huérfana de OpenAQ
 
-Durante la verificación del Bloque 5 apareció **una fila real** fuera de
-la retención de 60 días:
+Durante la purga (cierre de M10) apareció una fila real fuera de
+retención:
 
 ```
 id=3532, fuente=openaq, estación="colegio Bolivar" (id_externo=3163445),
 contaminante=pm10, valor=3.875 µg/m³,
-medido_en=2025-01-13 23:00:00+00 (hace ~9 meses),
-capturado_en=2026-10-07 11:07:19+00 (la ingesta del Bloque 2).
+medido_en=2025-01-13 (hace ~9 meses),
+capturado_en=2026-10-07 (ingesta real).
 ```
 
-El cliente de OpenAQ (M3) filtra por frescura de la ESTACIÓN (si reportó
-algo en la ventana de actividad de 7 días), no por frescura de la
-LECTURA. Si OpenAQ dice que la estación sigue activa pero `/latest`
-devuelve un valor de hace 9 meses (metadata inconsistente del lado de
-OpenAQ), la lectura se guarda igual. El filtro de frescura por lectura
-que sí aplican IBOCA y SIATA (M4) no existe en el cliente de OpenAQ.
+**Causa:** el cliente de OpenAQ (M3) filtra por frescura de la ESTACIÓN
+(ventana de actividad), no por frescura de la LECTURA que devuelve
+`/latest`. IBOCA y SIATA sí aplican ese filtro por lectura; OpenAQ no.
+La purga la barrió por antigüedad, pero si se acumulan estaciones así
+infla la tabla.
 
-**Impacto:** bajo. Una fila huérfana no rompe nada (no está referenciada
-por FKs) y la purga la elimina por antigüedad. Sin embargo, si hubiera
-muchas estaciones así, infla la tabla y sesga las agregaciones que usan
-la ventana de actividad (por ejemplo, `_lecturas_recientes` de M6 filtra
-por `medido_en >= ahora - 7 días`, así que esta fila NO la afectaba).
-**Ajustar el cliente de OpenAQ para descartar lecturas más viejas que
-`VENTANA_ACTIVIDAD_DIAS` es un cambio a M3, no a M10.** Se anota como
-hallazgo para que el PM decida si vale un mini-módulo aparte.
+**Impacto:** bajo (una fila; no está referenciada por FKs; las
+agregaciones filtran por ventana de 7 días, así que no la veían).
+**Anotado para eventual mini-módulo aparte (cambio a M3, no a M10).**
 
 ---
 
-## Estado esperado del sistema al cerrar M10
+## Estado esperado del sistema al cerrar M10.1
 
 - Los 3 servicios de Compose quedan levantados.
-- El scheduler arranca con los 5 jobs registrados: `ingesta`,
-  `pronosticos`, `auditoria`, `purgas`, `purgas_sesiones`.
+- El scheduler arranca con los **7 jobs** registrados: `reconciliacion`,
+  `ingesta`, `pronosticos`, `auditoria`, `reportes`, `purgas`,
+  `purgas_sesiones`.
 - Los endpoints `/internal/*` de disparo manual siguen funcionando sin
-  cambios (D88: dos caminos al mismo código), con la cabecera
-  `X-Internal-Token` (D79).
+  cambios (D88), con la cabecera `X-Internal-Token` (D79).
 - Para apagar: `docker compose down` (los datos persisten en el volumen
   `pgdata`).
