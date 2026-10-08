@@ -1,5 +1,5 @@
 """
-Tests del arranque/parada del scheduler (M10 Bloques 2, 3, 4 y 5).
+Tests del arranque/parada del scheduler (M10 Bloques 2–5 + M10.1 Bloques 1–2).
 
 Verifican la guarda `SCHEDULER_ENABLED` y el registro de los jobs.
 No tocan red ni base.
@@ -19,8 +19,6 @@ from scheduler import scheduler as sched_mod
 
 class TestSchedulerDeshabilitado(unittest.TestCase):
     def setUp(self) -> None:
-        # Estado limpio: cualquier test previo que haya arrancado el
-        # scheduler no debe contaminar este.
         sched_mod._scheduler = None
 
     def tearDown(self) -> None:
@@ -52,7 +50,6 @@ class TestSchedulerHabilitado(unittest.TestCase):
         self.assertTrue(sched_mod._scheduler.running)
         ids = {j.id for j in sched_mod._scheduler.get_jobs()}
         self.assertIn("ingesta", ids)
-        # El job de prueba del Bloque 1 ya no existe.
         self.assertNotIn("prueba_m10", ids)
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
@@ -60,9 +57,6 @@ class TestSchedulerHabilitado(unittest.TestCase):
         sched_mod.iniciar_scheduler()
         job = sched_mod._scheduler.get_job("ingesta")
         self.assertIsNotNone(job)
-        # El trigger es un CronTrigger con minute=5 y hour=*.
-        # Los campos del trigger de APScheduler exponen `.fields` con
-        # las expresiones originales.
         campos = {f.name: str(f) for f in job.trigger.fields}
         self.assertEqual(campos["hour"], "*")
         self.assertEqual(campos["minute"], "5")
@@ -88,18 +82,16 @@ class TestSchedulerHabilitado(unittest.TestCase):
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
     def test_detener_sin_arrancar_no_falla(self) -> None:
-        # Idempotente: no debe lanzar.
         sched_mod.detener_scheduler()
         self.assertIsNone(sched_mod._scheduler)
 
-    # ----- Bloque 3: job de pronósticos -----------------------------------
+    # ----- M10 Bloque 3: job de pronósticos -------------------------------
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
     def test_arranca_y_registra_job_pronosticos(self) -> None:
         sched_mod.iniciar_scheduler()
         ids = {j.id for j in sched_mod._scheduler.get_jobs()}
         self.assertIn("pronosticos", ids)
-        # El job del Bloque 2 sigue registrado también:
         self.assertIn("ingesta", ids)
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
@@ -117,7 +109,7 @@ class TestSchedulerHabilitado(unittest.TestCase):
         job = sched_mod._scheduler.get_job("pronosticos")
         self.assertEqual(job.misfire_grace_time, 3600)
 
-    # ----- Bloque 4: job de auditoría -------------------------------------
+    # ----- M10 Bloque 4: job de auditoría ---------------------------------
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
     def test_arranca_y_registra_job_auditoria(self) -> None:
@@ -142,7 +134,7 @@ class TestSchedulerHabilitado(unittest.TestCase):
         job = sched_mod._scheduler.get_job("auditoria")
         self.assertEqual(job.misfire_grace_time, 3600)
 
-    # ----- Bloque 5: jobs de purga ----------------------------------------
+    # ----- M10 Bloque 5: jobs de purga ------------------------------------
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
     def test_arranca_y_registra_jobs_purgas(self) -> None:
@@ -152,24 +144,72 @@ class TestSchedulerHabilitado(unittest.TestCase):
         self.assertIn("purgas_sesiones", ids)
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
-    def test_jobs_purgas_tienen_trigger_cron_a_las_05_10(self) -> None:
+    def test_jobs_purgas_tienen_trigger_cron_a_las_05_30(self) -> None:
+        # M10.1: horario movido de 05:10 a 05:30 para dejar lugar a reportes.
         sched_mod.iniciar_scheduler()
         for job_id in ("purgas", "purgas_sesiones"):
             job = sched_mod._scheduler.get_job(job_id)
             self.assertIsNotNone(job, f"job {job_id} no encontrado")
             campos = {f.name: str(f) for f in job.trigger.fields}
             self.assertEqual(campos["hour"], "5", f"{job_id}: hour")
-            self.assertEqual(campos["minute"], "10", f"{job_id}: minute")
+            self.assertEqual(campos["minute"], "30", f"{job_id}: minute")
+
+    # ----- M10.1 Bloque 1: job de reconciliación --------------------------
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_arranca_y_registra_job_reconciliacion(self) -> None:
+        sched_mod.iniciar_scheduler()
+        ids = {j.id for j in sched_mod._scheduler.get_jobs()}
+        self.assertIn("reconciliacion", ids)
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_job_reconciliacion_tiene_trigger_cron_a_las_03_40(self) -> None:
+        sched_mod.iniciar_scheduler()
+        job = sched_mod._scheduler.get_job("reconciliacion")
+        self.assertIsNotNone(job)
+        campos = {f.name: str(f) for f in job.trigger.fields}
+        self.assertEqual(campos["hour"], "3")
+        self.assertEqual(campos["minute"], "40")
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_job_reconciliacion_tiene_misfire_grace_time_1h(self) -> None:
+        sched_mod.iniciar_scheduler()
+        job = sched_mod._scheduler.get_job("reconciliacion")
+        self.assertEqual(job.misfire_grace_time, 3600)
+
+    # ----- M10.1 Bloque 2: job de reportes --------------------------------
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_arranca_y_registra_job_reportes(self) -> None:
+        sched_mod.iniciar_scheduler()
+        ids = {j.id for j in sched_mod._scheduler.get_jobs()}
+        self.assertIn("reportes", ids)
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_job_reportes_tiene_trigger_cron_a_las_05_00(self) -> None:
+        sched_mod.iniciar_scheduler()
+        job = sched_mod._scheduler.get_job("reportes")
+        self.assertIsNotNone(job)
+        campos = {f.name: str(f) for f in job.trigger.fields}
+        self.assertEqual(campos["hour"], "5")
+        self.assertEqual(campos["minute"], "0")
+
+    @patch.object(settings, "SCHEDULER_ENABLED", True)
+    def test_job_reportes_tiene_misfire_grace_time_1h(self) -> None:
+        sched_mod.iniciar_scheduler()
+        job = sched_mod._scheduler.get_job("reportes")
+        self.assertEqual(job.misfire_grace_time, 3600)
 
     # ----- Conteo global --------------------------------------------------
 
     @patch.object(settings, "SCHEDULER_ENABLED", True)
-    def test_scheduler_registra_exactamente_5_jobs(self) -> None:
+    def test_scheduler_registra_exactamente_7_jobs(self) -> None:
         # Red de seguridad: si alguien agrega un job sin querer, el test
-        # lo detecta. Total del módulo M10: 5 jobs (ingesta, pronosticos,
-        # auditoria, purgas, purgas_sesiones).
+        # lo detecta. Total tras M10.1 Bloque 2: 7 jobs (reconciliacion,
+        # ingesta, pronosticos, auditoria, reportes, purgas,
+        # purgas_sesiones).
         sched_mod.iniciar_scheduler()
-        self.assertEqual(len(sched_mod._scheduler.get_jobs()), 5)
+        self.assertEqual(len(sched_mod._scheduler.get_jobs()), 7)
 
 
 if __name__ == "__main__":

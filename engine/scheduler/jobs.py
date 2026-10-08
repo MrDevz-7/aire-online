@@ -1,16 +1,15 @@
 """
-Jobs del scheduler (M10).
+Jobs del scheduler (M10 y M10.1).
 
 D88: los jobs llaman DIRECTO a las funciones de servicio
 (`services/ingestion.py`, `services/pronosticos.py`,
-`services/auditoria.py`, ...), no hacen HTTP a `/internal/*` ni a
+`services/auditoria.py`, `services/reconciliacion.py`,
+`services/reportes.py`), no hacen HTTP a `/internal/*` ni a
 `/api/admin/*` de sí mismos. Mismo proceso, mismo intérprete: la vuelta
 de red y el `INTERNAL_API_TOKEN` son innecesarios.
 
-Las purgas (Bloque 5) son la excepción a la regla D88: no hay una función
-de servicio que llamar, así que el job ejecuta el DELETE directo. Son dos
-consultas SQL; no ameritan un módulo `services/purgas.py`. Si en el
-futuro crece, se extrae.
+Las purgas son la excepción a la regla D88: no hay una función de
+servicio que llamar, así que el job ejecuta el DELETE directo.
 
 Patrón de cada job real:
     def job_xxx() -> None:
@@ -26,10 +25,13 @@ Patrón de cada job real:
             db.close()
 
 Bloques implementados:
-    - Bloque 2: job_ingesta (cada hora al minuto :05).
-    - Bloque 3: job_pronosticos (04:10, D89).
-    - Bloque 4: job_auditoria (04:40, D89).
-    - Bloque 5 (este): job_purgas + job_purgas_sesiones (05:10, D89).
+    - M10 Bloque 2: job_ingesta (cada hora al minuto :05).
+    - M10 Bloque 3: job_pronosticos (04:10).
+    - M10 Bloque 4: job_auditoria (04:40).
+    - M10 Bloque 5: job_purgas + job_purgas_sesiones (05:30, movido de 05:10
+      en M10.1).
+    - M10.1 Bloque 1: job_reconciliacion (03:40).
+    - M10.1 Bloque 2 (este): job_reportes (05:00).
 """
 from __future__ import annotations
 
@@ -53,6 +55,11 @@ from services.ingestion import (
     ejecutar_siata,
 )
 from services.pronosticos import capturar_pronosticos
+from services.reconciliacion import (
+    calcular_comparaciones,
+    calcular_emparejamientos,
+)
+from services.reportes import generar_reportes
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +74,7 @@ ZONA_HORARIA = "America/Bogota"
 
 
 # ---------------------------------------------------------------------------
-# Bloque 2 — Job de ingesta repartida
+# M10 Bloque 2 — Job de ingesta repartida
 # ---------------------------------------------------------------------------
 def _fuentes_ingesta() -> tuple[tuple[str, Callable[[Session], ResumenIngestion]], ...]:
     """Tupla (nombre, función) de las 4 fuentes de ingesta.
@@ -168,7 +175,7 @@ def job_ingesta() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bloque 3 — Job de captura diaria de pronósticos (D62, D89)
+# M10 Bloque 3 — Job de captura diaria de pronósticos (D62, D89)
 # ---------------------------------------------------------------------------
 def job_pronosticos() -> None:
     """Wrapper del job de captura diaria de pronósticos (Open-Meteo).
@@ -202,7 +209,7 @@ def job_pronosticos() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bloque 4 — Job de auditoría diaria (D66, D69, D89)
+# M10 Bloque 4 — Job de auditoría diaria (D66, D69, D89)
 # ---------------------------------------------------------------------------
 def job_auditoria() -> None:
     """Wrapper del job de auditoría diaria.
@@ -237,7 +244,7 @@ def job_auditoria() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bloque 5 — Jobs de purga (D90, D91)
+# M10 Bloque 5 — Jobs de purga (D90, D91)
 # ---------------------------------------------------------------------------
 def job_purgas() -> None:
     """Purga lecturas detalladas más allá de su retención (D15, D90).
@@ -323,6 +330,99 @@ def job_purgas_sesiones() -> None:
 
 
 # ---------------------------------------------------------------------------
+# M10.1 Bloque 1 — Job de reconciliación diaria (D36, D92)
+# ---------------------------------------------------------------------------
+def job_reconciliacion() -> None:
+    """Reconciliación diaria: emparejar y después comparar, en ese orden.
+
+    `calcular_comparaciones` depende de que los pares ya estén armados
+    por `calcular_emparejamientos`. Correr el segundo sin el primero
+    sería comparar contra una tabla vacía (o contra pares viejos, si
+    los hubiera de una corrida previa). Por eso:
+      - Se ejecuta emparejar primero.
+      - Si falla emparejar, NO se corre comparar (no hay pares frescos
+        con los que trabajar). El error se loguea y se espera al próximo
+        día.
+
+    Ambos cálculos son idempotentes (`ON CONFLICT DO UPDATE`), así que
+    correr el job dos veces seguidas no duplica ni pisa nada (M5a).
+
+    Nunca lanza: el scheduler no tiene a quién avisarle.
+    """
+    db = SessionLocal()
+    try:
+        resumen_emp = calcular_emparejamientos(db)
+        logger.info(
+            "[scheduler] reconciliación emparejar OK: evaluados=%d, "
+            "nuevos=%d, actualizados=%d, sin_cambios=%d",
+            resumen_emp.pares_evaluados,
+            resumen_emp.pares_nuevos,
+            resumen_emp.pares_actualizados,
+            resumen_emp.pares_sin_cambios,
+        )
+        resumen_cmp = calcular_comparaciones(db)
+        logger.info(
+            "[scheduler] reconciliación comparar OK: evaluadas=%d, "
+            "nuevas=%d, actualizadas=%d, omitidas=%d",
+            resumen_cmp.comparaciones_evaluadas,
+            resumen_cmp.comparaciones_nuevas,
+            resumen_cmp.comparaciones_actualizadas,
+            resumen_cmp.comparaciones_omitidas,
+        )
+    except Exception:
+        logger.exception("[scheduler] reconciliación falló")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# M10.1 Bloque 2 — Job de reportes diarios (D73, D92)
+# ---------------------------------------------------------------------------
+def job_reportes() -> None:
+    """Genera todos los reportes del día, con la misma función que el
+    endpoint manual (`POST /api/admin/reportes/generar`).
+
+    Con los defaults (`tipo=None`, `alcance=None`), `generar_reportes`
+    recorre AMBOS tipos (`estado_ciudad` y `auditoria_pronostico`) y
+    TODOS los alcances disponibles para cada uno (global + ciudades con
+    lecturas recientes). No hace falta iterar tipos acá: la función
+    hace eso internamente.
+
+    Presupuesto D73: `generar_reportes` consulta `GEMINI_MAX_LLAMADAS_DIA`
+    internamente en cada llamada (mismo contador que el disparo manual).
+    Si el día ya se agotó, cae a la plantilla determinística sin llamar
+    a Gemini — no revienta. El job hereda ese comportamiento sin
+    duplicar la lógica.
+
+    Logging: además del resumen que devuelve `generar_reportes`, el job
+    suma y loguea el total de `llamadas_ia` de la corrida. Es el número
+    que importa para vigilar D73 desde los logs (sin tener que consultar
+    la base).
+
+    Nunca lanza: el scheduler no tiene a quién avisarle.
+    """
+    db = SessionLocal()
+    try:
+        r = generar_reportes(db)
+        llamadas_totales = sum(rr.llamadas_ia for rr in r.reportes)
+        logger.info(
+            "[scheduler] reportes OK: totales=%d, nuevos=%d, "
+            "reutilizados=%d, por_origen=%s, por_motivo_fallback=%s, "
+            "llamadas_ia_totales=%d",
+            r.totales,
+            r.nuevos,
+            r.reutilizados,
+            dict(sorted(r.por_origen.items())),
+            dict(sorted(r.por_motivo_fallback.items())),
+            llamadas_totales,
+        )
+    except Exception:
+        logger.exception("[scheduler] reportes falló")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Registro de jobs
 # ---------------------------------------------------------------------------
 def registrar_jobs(sched: BackgroundScheduler) -> None:
@@ -332,19 +432,35 @@ def registrar_jobs(sched: BackgroundScheduler) -> None:
     `misfire_grace_time` razonable. El `id` es el que aparece en los logs
     y en `sched.get_jobs()`, útil para verificar la programación.
 
-    Programación vigente (D89, hora local `America/Bogota`):
-        - ingesta:            cada hora, minuto :05
-        - pronósticos:        04:10
-        - auditoría:          04:40
-        - purgas (lecturas):  05:10
-        - purgas (sesiones):  05:10
+    Programación vigente (D89 + D92, hora local `America/Bogota`):
+        - reconciliación:  03:40
+        - ingesta:         cada hora, minuto :05
+        - pronósticos:     04:10
+        - auditoría:       04:40
+        - reportes:        05:00
+        - purgas:          05:30
 
-    El orden de la madrugada es pronosticos -> auditoria -> purgas: la
-    auditoría audita el día que YA CERRÓ, y las purgas corren al final
-    para no borrar lecturas que la auditoría podría necesitar. Aunque en
-    la práctica las purgas solo borran lo muy viejo (60 días), el orden
-    correcto es dejar que la auditoría use las lecturas primero.
+    El orden de la madrugada es: reconciliación -> pronósticos ->
+    auditoría -> reportes -> purgas. Reconciliación corre ANTES de la
+    captura/auditoría porque no depende de ellas (trabaja con lecturas
+    ya ingeridas); los reportes corren DESPUÉS de la auditoría porque
+    la ficha de `auditoria_pronostico` los usa, y las purgas quedan al
+    final para no borrar nada antes de que los jobs de la madrugada
+    hayan terminado de usar las tablas.
     """
+    sched.add_job(
+        job_reconciliacion,
+        trigger="cron",
+        hour=3,
+        minute=40,
+        timezone=ZONA_HORARIA,
+        id="reconciliacion",
+        replace_existing=True,
+        max_instances=1,
+        # 1 hora de gracia: es un job diario, perder la corrida por un
+        # reinicio corto es peor que arrancar 1 h tarde.
+        misfire_grace_time=3600,
+    )
     sched.add_job(
         job_ingesta,
         trigger="cron",
@@ -365,9 +481,6 @@ def registrar_jobs(sched: BackgroundScheduler) -> None:
         id="pronosticos",
         replace_existing=True,
         max_instances=1,
-        # 1 hora de gracia: si el proceso se reinicia y la corrida de las
-        # 04:10 se atrasa menos de 60 min, se recupera; si más, se saltea
-        # y espera al día siguiente.
         misfire_grace_time=3600,
     )
     sched.add_job(
@@ -382,23 +495,35 @@ def registrar_jobs(sched: BackgroundScheduler) -> None:
         misfire_grace_time=3600,
     )
     sched.add_job(
+        job_reportes,
+        trigger="cron",
+        hour=5,
+        minute=0,
+        timezone=ZONA_HORARIA,
+        id="reportes",
+        replace_existing=True,
+        max_instances=1,
+        # 1 hora de gracia: es un job diario. Si el proceso se reinicia
+        # y la corrida de las 05:00 se atrasa menos de 60 min, se
+        # recupera; si más, espera al día siguiente.
+        misfire_grace_time=3600,
+    )
+    sched.add_job(
         job_purgas,
         trigger="cron",
         hour=5,
-        minute=10,
+        minute=30,
         timezone=ZONA_HORARIA,
         id="purgas",
         replace_existing=True,
         max_instances=1,
-        # 30 min de gracia: es la última corrida de la ventana de la
-        # madrugada, no necesita más margen que eso.
         misfire_grace_time=1800,
     )
     sched.add_job(
         job_purgas_sesiones,
         trigger="cron",
         hour=5,
-        minute=10,
+        minute=30,
         timezone=ZONA_HORARIA,
         id="purgas_sesiones",
         replace_existing=True,

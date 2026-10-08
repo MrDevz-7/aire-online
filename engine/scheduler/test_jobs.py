@@ -1,5 +1,5 @@
 """
-Tests de los jobs del scheduler (M10 Bloques 2, 3, 4 y 5).
+Tests de los jobs del scheduler (M10 Bloques 2–5 + M10.1 Bloques 1–2).
 
 Puros: mockean las funciones de servicio y la sesión de base. No arrancan
 el scheduler real, no tocan red, no tocan Postgres.
@@ -23,6 +23,8 @@ from scheduler.jobs import (
     job_pronosticos,
     job_purgas,
     job_purgas_sesiones,
+    job_reconciliacion,
+    job_reportes,
 )
 
 
@@ -35,6 +37,19 @@ def _resumen_mock(nombre_fuente: str) -> MagicMock:
     r.lecturas_duplicadas = 0
     r.lecturas_invalidas = 0
     r.a_dict.return_value = {"fuente": nombre_fuente, "lecturas_insertadas": 10}
+    return r
+
+
+def _resumen_generacion_vacio() -> MagicMock:
+    """Mock de ResumenGeneracion con todos los campos que `job_reportes`
+    lee para loguear. `reportes` vacío = 0 llamadas_ia."""
+    r = MagicMock()
+    r.totales = 0
+    r.nuevos = 0
+    r.reutilizados = 0
+    r.por_origen = {}
+    r.por_motivo_fallback = {}
+    r.reportes = []
     return r
 
 
@@ -332,6 +347,185 @@ class TestPurgaSesiones(unittest.TestCase):
         db.rollback.assert_called_once()
         db.commit.assert_not_called()
         db.close.assert_called_once()
+
+
+class TestJobReconciliacion(unittest.TestCase):
+    """Tests del job de reconciliación diaria (M10.1 Bloque 1, D92)."""
+
+    def test_llama_emparejar_antes_que_comparar(self) -> None:
+        # El orden importa: comparar necesita que emparejar ya haya
+        # corrido. Este test lo verifica con un grabador de orden.
+        orden: list[str] = []
+
+        def fake_emp(db):
+            orden.append("emparejar")
+            return MagicMock()
+
+        def fake_cmp(db):
+            orden.append("comparar")
+            return MagicMock()
+
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.calcular_emparejamientos", side_effect=fake_emp), \
+             patch("scheduler.jobs.calcular_comparaciones", side_effect=fake_cmp):
+            m_session.return_value = MagicMock()
+            job_reconciliacion()
+
+        self.assertEqual(orden, ["emparejar", "comparar"])
+
+    def test_ambas_funciones_reciben_la_misma_sesion(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.calcular_emparejamientos") as m_emp, \
+             patch("scheduler.jobs.calcular_comparaciones") as m_cmp:
+            m_session.return_value = MagicMock()
+            m_emp.return_value = MagicMock()
+            m_cmp.return_value = MagicMock()
+
+            job_reconciliacion()
+
+        db = m_session.return_value
+        m_emp.assert_called_once_with(db)
+        m_cmp.assert_called_once_with(db)
+        db.close.assert_called_once()
+
+    def test_falla_emparejar_no_llama_comparar(self) -> None:
+        # Si emparejar falla, no tiene sentido correr comparar contra
+        # pares viejos. El job se corta sin llamar al segundo.
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.calcular_emparejamientos") as m_emp, \
+             patch("scheduler.jobs.calcular_comparaciones") as m_cmp:
+            m_session.return_value = MagicMock()
+            m_emp.side_effect = RuntimeError("db caída")
+
+            # No debe lanzar (el logger.exception lo absorbe):
+            job_reconciliacion()
+
+        m_emp.assert_called_once()
+        m_cmp.assert_not_called()
+        m_session.return_value.close.assert_called_once()
+
+    def test_falla_comparar_no_propaga(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.calcular_emparejamientos") as m_emp, \
+             patch("scheduler.jobs.calcular_comparaciones") as m_cmp:
+            m_session.return_value = MagicMock()
+            m_emp.return_value = MagicMock()
+            m_cmp.side_effect = RuntimeError("db caída")
+
+            # No debe lanzar:
+            job_reconciliacion()
+
+        m_emp.assert_called_once()
+        m_cmp.assert_called_once()
+        m_session.return_value.close.assert_called_once()
+
+
+class TestJobReportes(unittest.TestCase):
+    """Tests del job de reportes diarios (M10.1 Bloque 2, D73/D92)."""
+
+    def test_llama_generar_reportes_con_defaults(self) -> None:
+        """El job NO pasa `tipo` ni `alcance`: delega a
+        `generar_reportes` con sus defaults, que recorre AMBOS tipos
+        (estado_ciudad + auditoria_pronostico) y todos los alcances
+        disponibles. Verificar que los kwargs quedan vacíos es equivalente
+        a verificar 'genera todo'."""
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.generar_reportes") as m_gen:
+            m_session.return_value = MagicMock()
+            m_gen.return_value = _resumen_generacion_vacio()
+
+            job_reportes()
+
+        args, kwargs = m_gen.call_args
+        self.assertEqual(args, (m_session.return_value,))
+        self.assertEqual(kwargs, {})
+        m_session.return_value.close.assert_called_once()
+
+    def test_exito_loguea_y_cierra_sesion(self) -> None:
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.generar_reportes") as m_gen:
+            m_session.return_value = MagicMock()
+            m_resumen = MagicMock()
+            m_resumen.totales = 3
+            m_resumen.nuevos = 1
+            m_resumen.reutilizados = 2
+            m_resumen.por_origen = {"gemini": 1, "plantilla": 2}
+            m_resumen.por_motivo_fallback = {"cuota_diaria": 1, "forzado": 1}
+            rr1 = MagicMock(); rr1.llamadas_ia = 1
+            rr2 = MagicMock(); rr2.llamadas_ia = 0
+            rr3 = MagicMock(); rr3.llamadas_ia = 0
+            m_resumen.reportes = [rr1, rr2, rr3]
+            m_gen.return_value = m_resumen
+
+            # No debe lanzar:
+            job_reportes()
+
+        m_gen.assert_called_once_with(m_session.return_value)
+        m_session.return_value.close.assert_called_once()
+
+    def test_suma_llamadas_ia_correctamente(self) -> None:
+        """El log incluye la SUMA de `llamadas_ia` de todos los reportes.
+        Es el número con el que se vigila D73 desde los logs, sin consultar
+        la base."""
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.generar_reportes") as m_gen, \
+             patch("scheduler.jobs.logger") as m_log:
+            m_session.return_value = MagicMock()
+            m_resumen = MagicMock()
+            m_resumen.totales = 3
+            m_resumen.nuevos = 3
+            m_resumen.reutilizados = 0
+            m_resumen.por_origen = {"gemini": 3}
+            m_resumen.por_motivo_fallback = {}
+            rr1 = MagicMock(); rr1.llamadas_ia = 2
+            rr2 = MagicMock(); rr2.llamadas_ia = 1
+            rr3 = MagicMock(); rr3.llamadas_ia = 3
+            m_resumen.reportes = [rr1, rr2, rr3]
+            m_gen.return_value = m_resumen
+
+            job_reportes()
+
+        # logger.info(fmt, *args): args[-1] es `llamadas_totales` = 2+1+3.
+        args = m_log.info.call_args[0]
+        self.assertEqual(args[-1], 6)
+
+    def test_falla_no_propaga_y_cierra_sesion(self) -> None:
+        """Si `generar_reportes` lanza (por un bug inesperado, no por el
+        presupuesto agotado — ese caso lo maneja la propia función y NO
+        lanza), el job lo absorbe y la sesión se cierra igual."""
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.generar_reportes") as m_gen:
+            m_session.return_value = MagicMock()
+            m_gen.side_effect = RuntimeError("Gemini caído de forma inesperada")
+
+            # No debe lanzar: el scheduler no debe morir por esto.
+            job_reportes()
+
+        m_session.return_value.close.assert_called_once()
+
+    def test_presupuesto_agotado_no_es_excepcion(self) -> None:
+        """Con el presupuesto diario agotado, `generar_reportes` NO lanza:
+        devuelve un `ResumenGeneracion` normal con `motivo_fallback`
+        `cuota_diaria` y `llamadas_ia=0`. El job no necesita manejar ese
+        caso por separado: se comporta como una corrida normal."""
+        with patch("scheduler.jobs.SessionLocal") as m_session, \
+             patch("scheduler.jobs.generar_reportes") as m_gen:
+            m_session.return_value = MagicMock()
+            m_resumen = MagicMock()
+            m_resumen.totales = 2
+            m_resumen.nuevos = 2
+            m_resumen.reutilizados = 0
+            m_resumen.por_origen = {"plantilla": 2}
+            m_resumen.por_motivo_fallback = {"cuota_diaria": 2}
+            rr1 = MagicMock(); rr1.llamadas_ia = 0
+            rr2 = MagicMock(); rr2.llamadas_ia = 0
+            m_resumen.reportes = [rr1, rr2]
+            m_gen.return_value = m_resumen
+
+            # No debe lanzar:
+            job_reportes()
+
+        m_session.return_value.close.assert_called_once()
 
 
 if __name__ == "__main__":
