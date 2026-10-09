@@ -3,10 +3,14 @@
 // Form de login (D78). Mensaje de error genérico (el backend no distingue
 // email inexistente de contraseña incorrecta). Al éxito, redirige a la
 // ruta `redirect` (si vino en el query) o a /admin.
+//
+// `useSearchParams()` obliga a envolver el componente en un <Suspense> para
+// que Next.js 16 pueda prerenderizar la página en build. El default export
+// es un wrapper delgado con el Suspense; la lógica real vive en LoginForm.
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { LogIn } from "lucide-react";
@@ -22,8 +26,9 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ErrorState } from "@/components/ui/error-state";
+import { Skeleton } from "@/components/ui/skeleton";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { login, isAuthenticated, isLoading } = useAuth();
@@ -35,10 +40,9 @@ export default function LoginPage() {
   const redirectTo = searchParams.get("redirect") ?? "/admin";
 
   // Redirigir si ya hay sesión. Va en un useEffect (no en el render):
-  // llamar `router.replace()` durante el render es lo que dispara el
-  // warning "Cannot update a component (Router) while rendering a
-  // different component (LoginPage)". React necesita que la navegación
-  // sea un efecto secundario, no parte del cálculo del árbol.
+  // llamar `router.replace()` durante el render dispara el warning
+  // "Cannot update a component (Router) while rendering a different
+  // component (LoginPage)".
   useEffect(() => {
     if (isLoading) return;
     if (isAuthenticated && !isSubmitting) {
@@ -52,7 +56,7 @@ export default function LoginPage() {
     setError(null);
     try {
       await login(email, password);
-      // El useEffect de arriba se encarga de la redirección cuando
+      // La redirección la maneja el useEffect de arriba cuando
       // `isAuthenticated` pasa a true. No hace falta llamar a
       // router.replace acá.
     } catch (err) {
@@ -117,5 +121,26 @@ export default function LoginPage() {
         </CardContent>
       </Card>
     </main>
+  );
+}
+
+function LoginLoading() {
+  return (
+    <div className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center px-4 py-12">
+      <div className="w-full max-w-sm space-y-4">
+        <Skeleton className="h-8 w-1/2" />
+        <Skeleton className="h-4 w-3/4" />
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-10 w-full" />
+      </div>
+    </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={<LoginLoading />}>
+      <LoginForm />
+    </Suspense>
   );
 }
