@@ -5,13 +5,15 @@
 // haya parpadeo claro→oscuro.
 //
 // El footer lleva la nota mínima de D74 (proyecto no comercial, datos no
-// oficiales) en TODAS las páginas. La versión completa del checklist de
-// cumplimiento se arma en el Bloque 5/7.
+// oficiales) + el semáforo de salud del sistema (`<HealthFooter/>`), que
+// consulta /api/health cada 60 s. La versión completa del checklist D74 se
+// arma en el Bloque 5.
 
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Nav } from "@/components/nav";
+import { HealthFooter } from "@/components/health-footer";
 import { AuthProvider } from "@/lib/auth";
 import { ThemeProvider } from "@/lib/theme";
 
@@ -34,9 +36,6 @@ export const metadata: Metadata = {
     "Proyecto no comercial de reconciliación y auditoría de datos abiertos de calidad del aire en Bogotá y el Valle de Aburrá.",
 };
 
-// Script anti-flash: aplica la clase `dark` en <html> ANTES de que React
-// monte. Sin esto, la página arranca en claro y salta a oscuro cuando el
-// ThemeProvider lee localStorage. Es un patrón estándar de Next.js.
 const themeInitScript = `
 (function() {
   try {
@@ -75,12 +74,16 @@ export default function RootLayout({
                     · Datos <span className="font-medium">no oficiales</span> ·
                     Cobertura: Bogotá y Valle de Aburrá
                   </p>
-                  <p>
-                    Atribución de fuentes en{" "}
-                    <a className="underline hover:text-foreground" href="/atribuciones">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <HealthFooter />
+                    <span aria-hidden>·</span>
+                    <a
+                      className="underline hover:text-foreground"
+                      href="/atribuciones"
+                    >
                       /atribuciones
                     </a>
-                  </p>
+                  </div>
                 </div>
               </div>
             </footer>
