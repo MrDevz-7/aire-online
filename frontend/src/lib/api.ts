@@ -1,111 +1,303 @@
-
 // frontend/src/lib/api.ts
-import {
-  SearchRequest,
-  SearchResponse,
-  BusinessOut,
+//
+// Cliente HTTP del gateway. Es la ÚNICA puerta entre el frontend y el
+// backend: ninguna página hace `fetch` directo. Acá viven:
+//
+//   1. La URL base (env var NEXT_PUBLIC_GATEWAY_URL).
+//   2. El access token en memoria (D96): lo setea el AuthProvider y lo
+//      lee este módulo en cada request. Nunca en localStorage.
+//   3. `credentials: 'include'` en todas las llamadas: así viaja la
+//      cookie httpOnly de refresh sin que el frontend la toque.
+//   4. Traducción del sobre de error uniforme (D76/D86) a `ApiError`.
+//   5. Una función por endpoint, tipada, que devuelve la forma exacta
+//      del contrato.
+
+import type {
+  AlertasListResponse,
+  AlertasQuery,
+  AtribucionesResponse,
+  AuditoriaResumen,
+  EstadoFicha,
+  EstacionesListResponse,
+  EstacionesQuery,
   HealthResponse,
-  LeadDetail,
-  LeadListItem,
-  StageUpdateRequest,
-  LeadStageResponse,
-  CompetitorsResponse,
-  PipelineHistoryResponse,
-  GenerateEmailResponse,
-  AnalyzeLeadResponse,
+  LecturasListResponse,
+  LecturasQuery,
+  LoginRequest,
+  LoginResponse,
+  ReporteCompleto,
+  ResumenAuditoriaAdmin,
+  ResumenCapturaPronosticos,
+  ResumenComparacion,
+  ResumenEmparejamiento,
+  ResumenGeneracion,
+  ResumenIngestionAdmin,
+  TipoReporte,
+  UserInfo,
 } from "@/types/api";
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
-async function handleResponse<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`API error ${res.status}: ${text}`);
+
+// ---------------------------------------------------------------------------
+// Configuración
+// ---------------------------------------------------------------------------
+const BASE_URL =
+  process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:4000";
+
+// ---------------------------------------------------------------------------
+// Access token en memoria (D96)
+// ---------------------------------------------------------------------------
+let accessToken: string | null = null;
+
+/** Setea el access token actual. Lo llama el AuthProvider cada vez que
+ *  cambia. Nunca se persiste. */
+export function setAccessToken(token: string | null): void {
+  accessToken = token;
+}
+
+// ---------------------------------------------------------------------------
+// Error tipado del gateway
+// ---------------------------------------------------------------------------
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
   }
-  return res.json();
+
+  /** Parsea el cuerpo de la respuesta al sobre uniforme `{error:{code,message}}`.
+   *  Si el cuerpo no tiene la forma esperada (por ejemplo, un 502 de un proxy
+   *  intermedio), cae a un error genérico con el status HTTP. */
+  static async fromResponse(res: Response): Promise<ApiError> {
+    try {
+      const body = (await res.json()) as unknown;
+      if (
+        body &&
+        typeof body === "object" &&
+        "error" in body &&
+        body.error &&
+        typeof body.error === "object" &&
+        "code" in body.error &&
+        "message" in body.error
+      ) {
+        const e = body.error as { code: unknown; message: unknown };
+        return new ApiError(
+          res.status,
+          String(e.code),
+          String(e.message),
+        );
+      }
+    } catch {
+      // cuerpo no-JSON: cae al genérico
+    }
+    return new ApiError(
+      res.status,
+      "UNKNOWN",
+      `Error ${res.status} del servidor`,
+    );
+  }
 }
-export async function getHealth(): Promise<HealthResponse> {
-  const res = await fetch(`${API_URL}/api/health`);
-  return handleResponse<HealthResponse>(res);
+
+/** Mensaje listo para mostrar en la UI. Traduce los códigos que tienen un
+ *  mensaje más humano que el del backend, y para el resto usa el mensaje
+ *  que ya mandó el gateway. */
+export function mensajeDeError(err: unknown): string {
+  if (err instanceof ApiError) {
+    switch (err.code) {
+      case "RATE_LIMITED":
+        return "Demasiados intentos. Esperá un momento y probá de nuevo.";
+      case "CAPACIDAD_AGOTADA":
+        return "El servidor alcanzó el máximo de conexiones en vivo. Probá más tarde.";
+      case "ENGINE_TIMEOUT":
+        return "El servidor tardó demasiado en responder. Probá de nuevo.";
+      case "ENGINE_UNAVAILABLE":
+        return "El servidor no está disponible en este momento.";
+      case "UNAUTHENTICATED":
+      case "INVALID_CREDENTIALS":
+        return "Email o contraseña incorrectos.";
+      case "INVALID_REFRESH":
+        return "Tu sesión expiró. Volvé a entrar.";
+      case "NOT_FOUND":
+        return "No se encontró el recurso pedido.";
+      default:
+        return err.message;
+    }
+  }
+  if (err instanceof Error) return err.message;
+  return "Error desconocido";
 }
-export async function search(payload: SearchRequest): Promise<SearchResponse> {
-  const res = await fetch(`${API_URL}/api/search`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+
+// ---------------------------------------------------------------------------
+// Núcleo: una sola función arma todos los fetch
+// ---------------------------------------------------------------------------
+interface RequestOptions extends Omit<RequestInit, "body"> {
+  /** Se serializa a JSON automáticamente. */
+  body?: unknown;
+  /** Query params. Los `undefined` se omiten. */
+  query?: Record<string, string | number | boolean | undefined>;
+}
+
+async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const { body, query, ...init } = opts;
+  const url = new URL(path, BASE_URL);
+  if (query) {
+    for (const [k, v] of Object.entries(query)) {
+      if (v === undefined) continue;
+      url.searchParams.set(k, String(v));
+    }
+  }
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  if (accessToken) {
+    headers.set("Authorization", `Bearer ${accessToken}`);
+  }
+  if (body !== undefined && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  const res = await fetch(url.toString(), {
+    ...init,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    credentials: "include",
   });
-  return handleResponse<SearchResponse>(res);
+  if (!res.ok) {
+    throw await ApiError.fromResponse(res);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
 }
-export async function getBusinesses(
-  zone: string,
-  category: string
-): Promise<BusinessOut[]> {
-  const query = new URLSearchParams({ zone, category });
-  const res = await fetch(`${API_URL}/api/businesses?${query.toString()}`);
-  return handleResponse<BusinessOut[]>(res);
+
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+export function getHealth(): Promise<HealthResponse> {
+  return request<HealthResponse>("/api/health");
 }
-export async function analyzeLead(businessId: number): Promise<AnalyzeLeadResponse> {
-  const res = await fetch(`${API_URL}/api/leads/${businessId}/analyze`, {
-    method: "POST",
-  });
-  return handleResponse<AnalyzeLeadResponse>(res);
+
+// ---------------------------------------------------------------------------
+// Lectura pública (D76)
+// ---------------------------------------------------------------------------
+export function getEstaciones(
+  query: EstacionesQuery = {},
+): Promise<EstacionesListResponse> {
+  return request<EstacionesListResponse>("/api/estaciones", { query });
 }
-export async function getLeads(params?: {
-  stage?: string;
-  min_urgency?: number;
-}): Promise<LeadListItem[]> {
-  const query = new URLSearchParams();
-  if (params?.stage) query.set("stage", params.stage);
-  if (params?.min_urgency !== undefined)
-    query.set("min_urgency", String(params.min_urgency));
-  const qs = query.toString();
-  const res = await fetch(`${API_URL}/api/leads${qs ? `?${qs}` : ""}`);
-  return handleResponse<LeadListItem[]>(res);
-}
-export async function getLead(leadId: number): Promise<LeadDetail> {
-  const res = await fetch(`${API_URL}/api/leads/${leadId}`);
-  return handleResponse<LeadDetail>(res);
-}
-export async function updateLeadStage(
-  leadId: number,
-  payload: StageUpdateRequest
-): Promise<LeadStageResponse> {
-  const res = await fetch(`${API_URL}/api/leads/${leadId}/stage`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return handleResponse<LeadStageResponse>(res);
-}
-export async function getCompetitors(
-  leadId: number
-): Promise<CompetitorsResponse> {
-  const res = await fetch(`${API_URL}/api/leads/${leadId}/competitors`, {
-    method: "POST",
-  });
-  return handleResponse<CompetitorsResponse>(res);
-}
-export async function getPipelineHistory(
-  leadId: number
-): Promise<PipelineHistoryResponse> {
-  const res = await fetch(`${API_URL}/api/leads/${leadId}/pipeline-history`);
-  return handleResponse<PipelineHistoryResponse>(res);
-}
-export async function generateEmail(leadId: number): Promise<GenerateEmailResponse> {
-  const res = await fetch(`${API_URL}/api/leads/${leadId}/generate-email`, {
-    method: "POST",
-  });
-  return handleResponse<GenerateEmailResponse>(res);
-}
-import { EffectivenessResponse } from "@/types/api";
-export async function getEffectiveness(params?: {
-  zone?: string;
-  category?: string;
-}): Promise<EffectivenessResponse> {
-  const query = new URLSearchParams();
-  if (params?.zone) query.set("zone", params.zone);
-  if (params?.category) query.set("category", params.category);
-  const qs = query.toString();
-  const res = await fetch(
-    `${API_URL}/api/dashboard/effectiveness${qs ? `?${qs}` : ""}`
+
+export function getLecturas(
+  estacionId: number,
+  query: LecturasQuery = {},
+): Promise<LecturasListResponse> {
+  return request<LecturasListResponse>(
+    `/api/estaciones/${estacionId}/lecturas`,
+    { query },
   );
-  return handleResponse<EffectivenessResponse>(res);
+}
+
+export function getEstado(ciudad?: string): Promise<EstadoFicha> {
+  return request<EstadoFicha>("/api/estado", {
+    query: ciudad ? { ciudad } : undefined,
+  });
+}
+
+export function getAlertas(
+  query: AlertasQuery = {},
+): Promise<AlertasListResponse> {
+  return request<AlertasListResponse>("/api/alertas", { query });
+}
+
+export function getAuditoriaResumen(mes?: string): Promise<AuditoriaResumen> {
+  return request<AuditoriaResumen>("/api/auditoria/resumen", {
+    query: mes ? { mes } : undefined,
+  });
+}
+
+export function getAtribuciones(): Promise<AtribucionesResponse> {
+  return request<AtribucionesResponse>("/api/atribuciones");
+}
+
+export function getReporte(
+  tipo: TipoReporte,
+  alcance?: string,
+): Promise<ReporteCompleto> {
+  return request<ReporteCompleto>(`/api/reportes/${tipo}`, {
+    query: alcance ? { alcance } : undefined,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Auth (/api/auth/*)
+// ---------------------------------------------------------------------------
+export function authLogin(payload: LoginRequest): Promise<LoginResponse> {
+  return request<LoginResponse>("/api/auth/login", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function authRefresh(): Promise<LoginResponse> {
+  return request<LoginResponse>("/api/auth/refresh", { method: "POST" });
+}
+
+export function authLogout(): Promise<void> {
+  return request<void>("/api/auth/logout", { method: "POST" });
+}
+
+export function authMe(): Promise<UserInfo> {
+  return request<UserInfo>("/api/auth/me");
+}
+
+// ---------------------------------------------------------------------------
+// Admin (/api/admin/*) — una función por botón del panel
+// ---------------------------------------------------------------------------
+export type IngestFuente = "openaq" | "aqicn" | "iboca" | "siata";
+
+export function adminIngest(fuente: IngestFuente): Promise<ResumenIngestionAdmin> {
+  return request<ResumenIngestionAdmin>(`/api/admin/ingest/${fuente}`, {
+    method: "POST",
+  });
+}
+
+export function adminReconciliacionEmparejar(): Promise<ResumenEmparejamiento> {
+  return request<ResumenEmparejamiento>("/api/admin/reconciliacion/emparejar", {
+    method: "POST",
+  });
+}
+
+export function adminReconciliacionComparar(): Promise<ResumenComparacion> {
+  return request<ResumenComparacion>("/api/admin/reconciliacion/comparar", {
+    method: "POST",
+  });
+}
+
+export function adminAuditRun(): Promise<ResumenAuditoriaAdmin> {
+  return request<ResumenAuditoriaAdmin>("/api/admin/audit/run", {
+    method: "POST",
+  });
+}
+
+export function adminPronosticosCapturar(): Promise<ResumenCapturaPronosticos> {
+  return request<ResumenCapturaPronosticos>(
+    "/api/admin/pronosticos/capturar",
+    { method: "POST" },
+  );
+}
+
+export interface AdminReportesParams {
+  tipo?: TipoReporte;
+  alcance?: string;
+  forzar_plantilla?: boolean;
+}
+
+export function adminReportesGenerar(
+  params: AdminReportesParams = {},
+): Promise<ResumenGeneracion> {
+  return request<ResumenGeneracion>("/api/admin/reportes/generar", {
+    method: "POST",
+    query: {
+      tipo: params.tipo,
+      alcance: params.alcance,
+      forzar_plantilla: params.forzar_plantilla,
+    },
+  });
 }
