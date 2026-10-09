@@ -9,10 +9,13 @@
 //   - Pie: fuentes que aportan + timestamp del dato más reciente.
 //
 // Sin "use client": no tiene estado ni efectos, es server-compatible.
+//
+// Los nombres de fuente se muestran en mayúsculas vía `formatFuente`.
 
 import { Activity, MapPin } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { colorAQI } from "@/lib/colores-aqi";
+import { formatFuentes } from "@/lib/format-fuente";
 import { cn } from "@/lib/utils";
 import type { CiudadEnFicha } from "@/types/api";
 
@@ -98,7 +101,7 @@ export function EstadoCiudadCard({ ciudad }: { ciudad: CiudadEnFicha }) {
           {ciudad.fuentes_aportantes.length > 0 && (
             <p>
               <span className="font-medium">Fuentes:</span>{" "}
-              {ciudad.fuentes_aportantes.join(" · ")}
+              {formatFuentes(ciudad.fuentes_aportantes)}
             </p>
           )}
           {ciudad.dato_mas_reciente_local && (

@@ -40,6 +40,7 @@ def fuentes_sin_historico_publico() -> frozenset[str]:
     `historico_restringido: true`."""
     return _parse_fuentes(settings.FUENTES_SIN_HISTORICO_PUBLICO)
 
+
 # ---------------------------------------------------------------------------
 # Paginación (convención D75)
 # ---------------------------------------------------------------------------
@@ -59,6 +60,7 @@ def limit_y_offset(limit: int, offset: int) -> tuple[int, int]:
     if offset < 0:
         raise ValueError("offset debe ser >= 0")
     return limit, offset
+
 
 # ---------------------------------------------------------------------------
 # Endpoint 1 — GET /api/estaciones
@@ -103,7 +105,6 @@ def listar_estaciones(
     tiene columna `ciudad`: se infiere con `reportes.ciudad_de`. Con unos
     pocos cientos de estaciones esto es aceptable; si el volumen creciera
     mucho habría que materializar la columna (fuera del alcance de M7).
-
     Los filtros por `fuente` y `activa` sí van al SQL (D31: `activa` es
     la columna derivada de la ventana de actividad, no un cálculo on-the-fly).
     """
@@ -130,6 +131,7 @@ def listar_estaciones(
         "limit": limit,
         "offset": offset,
     }
+
 
 # ---------------------------------------------------------------------------
 # Endpoint 2 — GET /api/estaciones/{id}/lecturas
@@ -194,11 +196,9 @@ def _lecturas_en_ventana(
         filtros.append(Lectura.medido_en <= hasta)
     if contaminante is not None:
         filtros.append(Lectura.contaminante == contaminante)
-
     total = db.execute(
         select(func.count()).select_from(Lectura).where(*filtros)
     ).scalar_one()
-
     filas = list(
         db.execute(
             select(Lectura)
@@ -234,7 +234,6 @@ def listar_lecturas(
     estacion = db.get(Estacion, estacion_id)
     if estacion is None:
         raise EstacionNoEncontrada(f"Estación {estacion_id} no existe")
-
     restringida = estacion.fuente.lower() in fuentes_sin_historico_publico()
     if restringida:
         items, total = _ultimas_por_contaminante(db, estacion_id, contaminante)
@@ -248,7 +247,6 @@ def listar_lecturas(
         # tengan el mismo significado en ambas ramas.
     if restringida:
         items = items[offset : offset + limit]
-
     return {
         "items": items,
         "total": total,
@@ -256,6 +254,7 @@ def listar_lecturas(
         "offset": offset,
         "historico_restringido": restringida,
     }
+
 
 # ---------------------------------------------------------------------------
 # Endpoint 6 — GET /api/atribuciones
@@ -266,6 +265,13 @@ _ORDEN_FUENTES: tuple[str, ...] = ("openaq", "aqicn", "iboca", "siata", "open-me
 # Estado de confirmación de los términos/licencia de cada fuente. Sale de
 # la investigación documentada en docs/CONCEPTOS.md (M6, Bloque 4.4). El
 # TEXTO de atribución NO se duplica acá: se toma de `reportes.ATRIBUCIONES`.
+#
+# M11 Bloque 5: SIATA pasa de "no_confirmada" a "parcial". El PM confirmó
+# que el AMVA (entidad pública territorial) cae bajo la Ley 1712 de
+# Transparencia igual que la Secretaría Distrital de Ambiente de Bogotá
+# (IBOCA). La investigación de M6 no pudo verificar la licencia porque el
+# portal de datos abiertos del AMVA devolvía 502 durante el módulo; la
+# corrección sale de información que el PM verificó por su cuenta.
 ESTADOS_ATRIBUCION: dict[str, tuple[str, str]] = {
     "openaq": (
         "confirmada",
@@ -285,9 +291,10 @@ ESTADOS_ATRIBUCION: dict[str, tuple[str, str]] = {
         "licencia abierta formal tipo CC BY.",
     ),
     "siata": (
-        "no_confirmada",
-        "El portal de datos abiertos del AMVA devolvió 502 durante la "
-        "investigación (M6); sin licencia pública verificada.",
+        "parcial",
+        "El AMVA (Área Metropolitana del Valle de Aburrá) declara no "
+        "ejercer derechos de autor sobre sus indicadores (Ley 1712); no "
+        "es una licencia abierta formal tipo CC BY.",
     ),
     "open-meteo": (
         "confirmada",

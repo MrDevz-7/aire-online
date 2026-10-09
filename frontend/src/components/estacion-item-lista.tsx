@@ -5,10 +5,13 @@
 // navegar al detalle.
 //
 // Sin "use client": no tiene estado propio, los handlers vienen por prop.
+//
+// El nombre de la fuente se muestra en mayúsculas vía `formatFuente`.
 
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatFuente } from "@/lib/format-fuente";
 import type { EstacionItem } from "@/types/api";
 
 interface Props {
@@ -22,6 +25,10 @@ export function EstacionItemLista({
   seleccionada,
   onSeleccionar,
 }: Props) {
+  const sub = [estacion.ciudad, formatFuente(estacion.fuente)]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
     <li>
       <div
@@ -50,11 +57,7 @@ export function EstacionItemLista({
         />
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">{estacion.nombre}</p>
-          <p className="truncate text-xs text-muted-foreground">
-            {[estacion.ciudad, estacion.fuente]
-              .filter(Boolean)
-              .join(" · ") || estacion.fuente}
-          </p>
+          <p className="truncate text-xs text-muted-foreground">{sub}</p>
         </div>
         <Link
           href={`/estaciones/${estacion.id}`}

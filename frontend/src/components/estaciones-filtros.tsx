@@ -8,6 +8,8 @@
 // Los selects se pueblan a partir de la lista SIN filtrar (así las opciones
 // no desaparecen cuando se filtra por otra cosa). Recibe `opcionesFuentes` y
 // `opcionesCiudades` como props desde la página.
+//
+// Los nombres de fuente se muestran en mayúsculas vía `formatFuente`.
 
 "use client";
 
@@ -19,6 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
+import { formatFuente } from "@/lib/format-fuente";
 
 export type FiltroActiva = "todas" | "activas" | "inactivas";
 
@@ -60,7 +63,7 @@ export function EstacionesFiltros({
             <SelectItem value="todas">Todas</SelectItem>
             {opcionesFuentes.map((f) => (
               <SelectItem key={f} value={f}>
-                {f}
+                {formatFuente(f)}
               </SelectItem>
             ))}
           </SelectContent>

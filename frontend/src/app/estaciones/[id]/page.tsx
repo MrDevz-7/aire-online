@@ -34,6 +34,7 @@ import {
   YAxis,
 } from "recharts";
 import { getEstaciones, getLecturas } from "@/lib/api";
+import { formatFuente } from "@/lib/format-fuente";
 import { ErrorState } from "@/components/ui/error-state";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -199,7 +200,7 @@ export default function EstacionDetallePage() {
               </span>
               <span className="inline-flex items-center gap-1.5">
                 <Waves className="size-3.5" />
-                {estacion.fuente}
+                {formatFuente(estacion.fuente)}
               </span>
               <span
                 className={
