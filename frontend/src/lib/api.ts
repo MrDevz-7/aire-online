@@ -39,7 +39,12 @@ import type {
 // ---------------------------------------------------------------------------
 // Configuración
 // ---------------------------------------------------------------------------
-const BASE_URL =
+/**
+ * URL base del gateway. Exportada para que el componente SSE (`alertas-feed`)
+ * arme la URL de `EventSource` con la misma fuente de verdad que el resto
+ * del cliente. Un solo lugar donde se lee la env var.
+ */
+export const GATEWAY_BASE_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:4000";
 
 // ---------------------------------------------------------------------------
@@ -140,7 +145,7 @@ interface RequestOptions extends Omit<RequestInit, "body"> {
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const { body, query, ...init } = opts;
-  const url = new URL(path, BASE_URL);
+  const url = new URL(path, GATEWAY_BASE_URL);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       if (v === undefined) continue;
