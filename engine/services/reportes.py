@@ -209,8 +209,10 @@ def construir_ficha_estado_ciudad(
     fecha_ref = _fecha_local(ahora)
     filas = _lecturas_recientes(db, ahora)
     por_ciudad = _agrupar_por_ciudad(filas)
+
     if alcance != CIUDAD_GLOBAL:
         por_ciudad = {alcance: por_ciudad[alcance]} if alcance in por_ciudad else {}
+
     ciudades_ficha: list[dict[str, Any]] = []
     fuentes_totales: set[str] = set()
     for ciudad_nombre in sorted(por_ciudad.keys()):
@@ -240,9 +242,11 @@ def construir_ficha_estado_ciudad(
             "dato_mas_reciente_utc": _formato_utc(ultimo) if ultimo else None,
             "dato_mas_reciente_local": _formato_local(ultimo) if ultimo else None,
         })
+
     atribuciones = sorted(
         ATRIBUCIONES[f] for f in fuentes_totales if f in ATRIBUCIONES
     )
+
     return {
         "tipo": "estado_ciudad",
         "alcance": alcance,
@@ -252,7 +256,7 @@ def construir_ficha_estado_ciudad(
             "Cobertura real hoy: Bogotá y Valle de Aburrá.",
             "Los valores son promedios de estaciones puntuales, no un promedio del aire de toda la ciudad.",
             "El promedio combina las últimas lecturas disponibles de cada estación; no son simultáneas.",
-            "Solo se incluyen estaciones con lecturas dentro de la ventana de actividad (D31).",
+            "Solo se incluyen estaciones con lecturas dentro de la ventana de actividad.",
         ],
         "atribuciones": atribuciones,
     }
@@ -323,6 +327,7 @@ def _errores_por_contaminante_y_horizonte(
             AuditoriaPronostico.error_abs.is_not(None),
         )
     ).all()
+
     grupos: dict[tuple[str, int], dict[str, Any]] = {}
     for fila in filas:
         horiz = (fila.fecha_objetivo - fila.fecha_captura).days
@@ -334,6 +339,7 @@ def _errores_por_contaminante_y_horizonte(
         bucket["errores"].append(fila.error_abs)
         if fila.sesgo is not None:
             bucket["sesgos"].append(fila.sesgo)
+
     resultado: list[dict[str, Any]] = []
     for (cont, horiz), bucket in sorted(grupos.items()):
         dias = len(bucket["dias"])
@@ -369,11 +375,13 @@ def construir_ficha_auditoria_pronostico(
     fecha_ref = _fecha_local(ahora)
     mes_str = mes if mes is not None else _mes_local(ahora)
     desde_mes, hasta_mes = _rango_de_mes(mes_str)
+
     conteos = _conteos_auditoria(db, desde_mes=desde_mes, hasta_mes=hasta_mes)
     horizonte_max = _horizonte_maximo(db)
     errores = _errores_por_contaminante_y_horizonte(
         db, min_dias=settings.MIN_DIAS_AUDITADOS_PARA_PROMEDIO
     )
+
     return {
         "tipo": "auditoria_pronostico",
         "alcance": alcance,
@@ -408,11 +416,13 @@ def plantilla_estado_ciudad(ficha: dict[str, Any]) -> str:
             f"Reporte de estado del aire — {fecha}. "
             "No hay datos disponibles con la cobertura actual del sistema."
         )
+
     parrafos: list[str] = []
     encabezado = f"Reporte de estado del aire — {fecha}."
     if ficha["alcance"] == CIUDAD_GLOBAL:
         encabezado += " Cobertura: " + ", ".join(c["nombre"] for c in ciudades) + "."
     parrafos.append(encabezado)
+
     for ciudad in ciudades:
         nombre = ciudad["nombre"]
         conts = ciudad["contaminantes"]
@@ -432,6 +442,7 @@ def plantilla_estado_ciudad(ficha: dict[str, Any]) -> str:
             f"Fuentes: {', '.join(ciudad['fuentes_aportantes'])}. "
             f"Dato más reciente: {reciente}."
         )
+
     parrafos.append("Limitaciones: " + " ".join(ficha.get("limitaciones", [])))
     if ficha.get("atribuciones"):
         parrafos.append("Fuentes: " + " ".join(ficha["atribuciones"]) + ".")
@@ -476,6 +487,7 @@ def plantilla_auditoria_pronostico(ficha: dict[str, Any]) -> str:
                     f"{settings.MIN_DIAS_AUDITADOS_PARA_PROMEDIO} requeridos)"
                 )
         parrafos.append(" ".join(partes) + ".")
+
     parrafos.append("Limitaciones: " + " ".join(ficha.get("limitaciones", [])))
     if ficha.get("atribuciones"):
         parrafos.append("Fuentes: " + " ".join(ficha["atribuciones"]) + ".")
@@ -680,7 +692,9 @@ def generar_reporte(
     finally:
         if cliente_propio:
             c.close()
+
     llamadas = resultado.llamadas_gastadas
+
     if resultado.exito and resultado.texto is not None:
         motivo_validacion = validar(resultado.texto, ficha)
         if motivo_validacion is None:

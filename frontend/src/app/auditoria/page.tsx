@@ -5,9 +5,10 @@
 //   - 5 KPIs de conteos (capturados, pendientes, calculadas, no_auditable,
 //     sin_datos).
 //   - El gráfico de error por horizonte (componente <AuditoriaChart/>),
-//     que respeta `muestra_suficiente` (D95).
+//     que respeta `muestra_suficiente`.
 //   - Tabla con TODOS los items (incluidos los de muestra insuficiente),
-//     donde el mensaje de D66/D72 aparece tal cual el contrato lo expone.
+//     donde el mensaje de "muestra insuficiente" aparece tal cual el
+//     contrato lo expone.
 //   - Limitaciones y atribuciones traídas del backend.
 //
 // El mes se puede cambiar con un selector. Por default, el mes en curso
@@ -201,8 +202,8 @@ export default function AuditoriaPage() {
               </CardTitle>
               <p className="text-xs text-muted-foreground">
                 Una línea por contaminante. Solo se grafican los horizontes
-                con suficientes días auditados (D66/D72); el resto aparece
-                abajo en la tabla.
+                con suficientes días auditados; el resto aparece abajo en la
+                tabla.
               </p>
             </CardHeader>
             <CardContent>

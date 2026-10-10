@@ -15,14 +15,12 @@ export interface AppConfig {
   corsOrigins: string[];
   engineUrl: string;
   engineTimeoutMs: number;
-  // ----- M8: autenticación (D77, D78, D79) -----
   jwtSecret: string;
   jwtAccessTtlS: number;
   refreshTtlS: number;
   cookieSameSite: "lax" | "strict" | "none";
   internalApiToken: string;
   adminTimeoutMs: number;
-  // ----- M9: rate limiting, trust proxy, SSE (D82, D83, D85) -----
   trustProxy: number;
   rateLimitLoginIpMax: number;
   rateLimitLoginEmailMax: number;
@@ -39,25 +37,21 @@ const DEFAULT_ENGINE_URL = "http://localhost:8000";
 const DEFAULT_ENGINE_TIMEOUT_MS = 8000;
 const DEFAULT_JWT_ACCESS_TTL_S = 900;
 const DEFAULT_REFRESH_TTL_S = 604800;
-const DEFAULT_ADMIN_TIMEOUT_MS = 120000;
+// M11 Bloque 6: subido de 120s a 300s. El botón "Generar reportes" con
+// Gemini puede tardar varios minutos si Gemini está degradado (rota keys
+// y modelos antes de caer a plantilla). Con 120s el gateway cortaba la
+// operación antes de que el engine terminara, aunque el engine igual
+// seguía procesando del otro lado. 300s cubre el peor caso realista.
+const DEFAULT_ADMIN_TIMEOUT_MS = 300000;
 const JWT_SECRET_MIN_BYTES = 32;
 
-// ----- M9: rate limiting, trust proxy, SSE (D82, D83, D85) -----
-// Cantidad de proxies de confianza. Nunca `true`: con `true` cualquier
-// cliente puede falsificar X-Forwarded-For y evadir el límite por IP.
-// En Render se configura en 1. Ver D83.
 const DEFAULT_TRUST_PROXY = 0;
-// Login: por IP y por email (D82). El de email cuenta solo fallidos.
 const DEFAULT_RATE_LIMIT_LOGIN_IP_MAX = 10;
 const DEFAULT_RATE_LIMIT_LOGIN_EMAIL_MAX = 5;
 const DEFAULT_RATE_LIMIT_LOGIN_VENTANA_MIN = 15;
-// Refresh: por IP. Es más alto porque el cliente refresca solo.
 const DEFAULT_RATE_LIMIT_REFRESH_IP_MAX = 60;
-// Admin: por usuario autenticado (fallback: IP).
 const DEFAULT_RATE_LIMIT_ADMIN_POR_MINUTO = 10;
-// Poller de alertas (D85).
 const DEFAULT_ALERTAS_POLL_MS = 30_000;
-// SSE (D86).
 const DEFAULT_SSE_MAX_CLIENTS = 200;
 const DEFAULT_SSE_HEARTBEAT_MS = 25_000;
 
@@ -109,9 +103,6 @@ const envSchema = z
       .min(1000, "ADMIN_TIMEOUT_MS debe ser >= 1000")
       .max(600000, "ADMIN_TIMEOUT_MS debe ser <= 600000")
       .default(DEFAULT_ADMIN_TIMEOUT_MS),
-    // ----- M9: rate limiting, trust proxy, SSE (D82, D83, D85) -----
-    // D83: entero >= 0. Nunca `true`. Un valor no entero hace fallar
-    // el arranque con mensaje claro.
     TRUST_PROXY: z.coerce
       .number()
       .int("TRUST_PROXY debe ser un entero (cantidad de saltos)")
@@ -173,7 +164,8 @@ const envSchema = z
       ctx.addIssue({
         code: "custom",
         path: ["CORS_ORIGINS"],
-        message: "es obligatorio en production (lista de orígenes separados por coma)",
+        message:
+          "es obligatorio en production (lista de orígenes separados por coma)",
       });
     }
     for (const item of splitCsv(rawCors ?? "")) {

@@ -11,6 +11,9 @@
 //   4. Traducción del sobre de error uniforme (D76/D86) a `ApiError`.
 //   5. Una función por endpoint, tipada, que devuelve la forma exacta
 //      del contrato.
+//   6. Timeout configurable por request. Las llamadas admin usan 300 s
+//      para cubrir el caso de Gemini degradado (ver admin-acciones.ts).
+//      Coincide con ADMIN_TIMEOUT_MS del gateway.
 
 import type {
   AlertasListResponse,
@@ -46,6 +49,11 @@ import type {
  */
 export const GATEWAY_BASE_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:4000";
+
+/** Timeout para las llamadas admin. Debe coincidir con ADMIN_TIMEOUT_MS
+ *  del gateway (300 s) para que la respuesta del gateway llegue antes
+ *  que el abort local. */
+const ADMIN_TIMEOUT_MS = 300_000;
 
 // ---------------------------------------------------------------------------
 // Access token en memoria (D96)
@@ -87,11 +95,7 @@ export class ApiError extends Error {
         "message" in body.error
       ) {
         const e = body.error as { code: unknown; message: unknown };
-        return new ApiError(
-          res.status,
-          String(e.code),
-          String(e.message),
-        );
+        return new ApiError(res.status, String(e.code), String(e.message));
       }
     } catch {
       // cuerpo no-JSON: cae al genérico
@@ -137,14 +141,13 @@ export function mensajeDeError(err: unknown): string {
 // Núcleo: una sola función arma todos los fetch
 // ---------------------------------------------------------------------------
 interface RequestOptions extends Omit<RequestInit, "body"> {
-  /** Se serializa a JSON automáticamente. */
   body?: unknown;
-  /** Query params. Los `undefined` se omiten. */
   query?: Record<string, string | number | boolean | undefined>;
+  timeoutMs?: number;
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  const { body, query, ...init } = opts;
+  const { body, query, timeoutMs, ...init } = opts;
   const url = new URL(path, GATEWAY_BASE_URL);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
@@ -160,17 +163,42 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   if (body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const res = await fetch(url.toString(), {
-    ...init,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    credentials: "include",
-  });
-  if (!res.ok) {
-    throw await ApiError.fromResponse(res);
+
+  const controller = timeoutMs !== undefined ? new AbortController() : null;
+  const timer =
+    controller !== null
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+
+  try {
+    const res = await fetch(url.toString(), {
+      ...init,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: "include",
+      signal: controller?.signal,
+    });
+    if (!res.ok) {
+      throw await ApiError.fromResponse(res);
+    }
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      err.name === "AbortError" &&
+      timeoutMs !== undefined
+    ) {
+      throw new ApiError(
+        504,
+        "ENGINE_TIMEOUT",
+        `La operación superó los ${Math.round(timeoutMs / 1000)} s.`,
+      );
+    }
+    throw err;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,38 +281,47 @@ export function authMe(): Promise<UserInfo> {
 }
 
 // ---------------------------------------------------------------------------
-// Admin (/api/admin/*) — una función por botón del panel
+// Admin (/api/admin/*)
 // ---------------------------------------------------------------------------
 export type IngestFuente = "openaq" | "aqicn" | "iboca" | "siata";
 
-export function adminIngest(fuente: IngestFuente): Promise<ResumenIngestionAdmin> {
+export function adminIngest(
+  fuente: IngestFuente,
+): Promise<ResumenIngestionAdmin> {
   return request<ResumenIngestionAdmin>(`/api/admin/ingest/${fuente}`, {
     method: "POST",
+    timeoutMs: ADMIN_TIMEOUT_MS,
   });
 }
 
 export function adminReconciliacionEmparejar(): Promise<ResumenEmparejamiento> {
   return request<ResumenEmparejamiento>("/api/admin/reconciliacion/emparejar", {
     method: "POST",
+    timeoutMs: ADMIN_TIMEOUT_MS,
   });
 }
 
 export function adminReconciliacionComparar(): Promise<ResumenComparacion> {
   return request<ResumenComparacion>("/api/admin/reconciliacion/comparar", {
     method: "POST",
+    timeoutMs: ADMIN_TIMEOUT_MS,
   });
 }
 
 export function adminAuditRun(): Promise<ResumenAuditoriaAdmin> {
   return request<ResumenAuditoriaAdmin>("/api/admin/audit/run", {
     method: "POST",
+    timeoutMs: ADMIN_TIMEOUT_MS,
   });
 }
 
 export function adminPronosticosCapturar(): Promise<ResumenCapturaPronosticos> {
   return request<ResumenCapturaPronosticos>(
     "/api/admin/pronosticos/capturar",
-    { method: "POST" },
+    {
+      method: "POST",
+      timeoutMs: ADMIN_TIMEOUT_MS,
+    },
   );
 }
 
@@ -304,5 +341,6 @@ export function adminReportesGenerar(
       alcance: params.alcance,
       forzar_plantilla: params.forzar_plantilla,
     },
+    timeoutMs: ADMIN_TIMEOUT_MS,
   });
 }

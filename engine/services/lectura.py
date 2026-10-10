@@ -282,7 +282,7 @@ ESTADOS_ATRIBUCION: dict[str, tuple[str, str]] = {
         "confirmada",
         "Términos en aqicn.org/api/tos/: atribución al World Air Quality "
         "Index Project y a la agencia de origen; notificación previa por "
-        "email para uso público sin fines de lucro (D74).",
+        "email para uso público sin fines de lucro.",
     ),
     "iboca": (
         "parcial",

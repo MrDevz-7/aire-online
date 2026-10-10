@@ -1,12 +1,12 @@
 // frontend/src/lib/motivo-fallback.ts
 //
-// Traduce el `motivo_fallback` que persiste el backend (enum D70) a texto
+// Traduce el `motivo_fallback` que persiste el backend (enum) a texto
 // humano para mostrar en la card del reporte. Ninguno de estos motivos es
 // un error de la app: son la explicación de por qué se usó la plantilla
 // determinística en lugar de Gemini.
 //
 // El tono es informativo, no alarmante. "Cuota diaria agotada" es una
-// situación esperada del proyecto (D73), no un fallo.
+// situación esperada del proyecto, no un fallo.
 
 import type { MotivoFallback } from "@/types/api";
 
@@ -27,7 +27,7 @@ const MOTIVOS: Record<MotivoFallback, MotivoInfo> = {
   cuota_diaria: {
     titulo: "Cuota diaria de Gemini agotada",
     descripcion:
-      "El proyecto llegó al tope diario de solicitudes a Gemini (D73). El reporte se generó con la plantilla determinística. Mañana vuelve a estar disponible.",
+      "El proyecto llegó al tope diario de solicitudes a Gemini. El reporte se generó con la plantilla determinística. Mañana vuelve a estar disponible.",
     esperado: true,
   },
   http_429: {
@@ -51,7 +51,7 @@ const MOTIVOS: Record<MotivoFallback, MotivoInfo> = {
   validacion_numeros: {
     titulo: "Texto descartado: mencionaba números fuera de la ficha",
     descripcion:
-      "El texto que redactó Gemini contenía al menos un número que no estaba en los datos de entrada. Como el proyecto garantiza que nunca se inventan cifras (D70), ese texto se descartó y se usó la plantilla determinística.",
+      "El texto que redactó Gemini contenía al menos un número que no estaba en los datos de entrada. Como el proyecto garantiza que nunca se inventan cifras, ese texto se descartó y se usó la plantilla determinística.",
     esperado: false,
   },
   validacion_texto: {
