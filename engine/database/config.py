@@ -3,7 +3,6 @@ Configuración central de la aplicación, tipada con pydantic-settings.
 """
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -23,22 +22,31 @@ class Settings(BaseSettings):
     GEMINI_MODELOS_FALLBACK: str = (
         "gemini-3.5-flash-lite,gemini-3.1-flash-lite"
     )
+
     # Tope diario de solicitudes HTTP a Gemini (día local Colombia).
     GEMINI_MAX_LLAMADAS_DIA: int = 10
+
     # Tope de solicitudes HTTP por reporte, con rotaciones y reintentos.
     #
-    # M11 Bloque 6: bajado de 40 a 10. El peor caso realista (Gemini
-    # devolviendo 503/429 en todas las keys durante varios intentos)
-    # tiene que caber dentro del timeout del gateway, que es 300 s.
-    # Con 40 intentos × 60 s de timeout por intento el peor caso eran
-    # 40 min POR REPORTE; con 10 queda acotado a ~10 min por reporte
-    # como techo teórico, y en la práctica mucho menos porque los 503
-    # vuelven en ~1 s y no consumen el timeout completo.
-    #
-    # El scheduler de las 05:00 usa este mismo valor: la corrida
-    # automática también se beneficia del recorte.
-    GEMINI_MAX_INTENTOS_POR_REPORTE: int = 10
+    # M11.1 (D99): vuelve a 40. M11 lo había bajado a 10 como mitigación
+    # parcial contra un timeout descontrolado; D98 resuelve el problema
+    # en su raíz (presupuesto de tiempo global), así que bajar los
+    # intentos ya no aporta protección — solo resta resiliencia contra
+    # fallos transitorios de Gemini.
+    GEMINI_MAX_INTENTOS_POR_REPORTE: int = 40
+
     GEMINI_TIMEOUT_S: int = 60
+
+    # M11.1 (D98): presupuesto de tiempo TOTAL para una corrida de
+    # `generar_reportes` (los 4 reportes juntos, NO uno por reporte).
+    # Se calcula un `deadline` al arrancar la corrida y se pasa a cada
+    # llamada de Gemini; cuando `time.monotonic() >= deadline`, la
+    # cascada de keys/modelos se corta y el reporte (y los que queden
+    # pendientes) caen a plantilla con `motivo_fallback='timeout'`.
+    # Cota superior real de la corrida: GEMINI_BUDGET_TOTAL_S + hasta
+    # una llamada ya en vuelo (con GEMINI_TIMEOUT_S como cota de esa
+    # última llamada). Compatible con ADMIN_TIMEOUT_MS=300 s.
+    GEMINI_BUDGET_TOTAL_S: int = 60
 
     # --- Reportes (M6) ---
     MIN_DIAS_AUDITADOS_PARA_PROMEDIO: int = 3
@@ -58,6 +66,7 @@ class Settings(BaseSettings):
     # intacto). En producción (ENVIRONMENT=production) el engine se niega
     # a arrancar sin él (ver api.main.validar_arranque).
     INTERNAL_API_TOKEN: str = ""
+
     # development | production
     ENVIRONMENT: str = "development"
 
@@ -66,6 +75,5 @@ class Settings(BaseSettings):
     RETENCION_LECTURAS_DIAS: int = 60
     RETENCION_SESIONES_REVOCADAS_HORAS: int = 24
     MIN_HORAS_CON_LECTURA_AUDITORIA: int = 16
-
 
 settings = Settings()

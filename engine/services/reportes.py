@@ -13,6 +13,12 @@ pronóstico de Open-Meteo).
 Este módulo también contiene el orquestador `generar_reporte` (Bloque 5
 sub-pieza 4): construye la ficha, decide si llamar a Gemini o usar la
 plantilla, valida el texto, y persiste todo en `reportes`.
+
+M11.1 (D98): `generar_reportes` calcula UN deadline al arrancar la
+corrida (antes de iterar tipos/alcances) y lo pasa a cada
+`generar_reporte`, que a su vez lo propaga a `ClienteGemini.generar`.
+Es un presupuesto de tiempo para TODA la corrida (los 4 reportes juntos),
+no uno por reporte.
 """
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ import hashlib
 import json
 import logging
 import statistics
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
@@ -85,14 +92,11 @@ ATRIBUCIONES: dict[str, str] = {
 _CONTAMINANTES_AUDITADOS: tuple[str, ...] = ("aqi", "pm25", "pm10")
 _CONTAMINANTES_NO_AUDITABLES: tuple[str, ...] = ("o3", "no2", "so2", "co")
 
-
 def _fecha_local(ahora: datetime) -> date:
     return ahora.astimezone(OFFSET_COLOMBIA).date()
 
-
 def _mes_local(ahora: datetime) -> str:
     return ahora.astimezone(OFFSET_COLOMBIA).strftime("%Y-%m")
-
 
 def _rango_de_mes(mes: str) -> tuple[date, date]:
     """'2026-09' -> (date(2026,9,1), date(2026,9,30)). Se usa para acotar
@@ -107,7 +111,6 @@ def _rango_de_mes(mes: str) -> tuple[date, date]:
     else:
         hasta = date(anio, num_mes + 1, 1) - timedelta(days=1)
     return desde, hasta
-
 
 def ciudad_de(fuente: str, nombre: str) -> Optional[str]:
     """Ciudad inferida de una estación, o None si no se puede inferir.
@@ -125,7 +128,6 @@ def ciudad_de(fuente: str, nombre: str) -> Optional[str]:
             return ciudad
     return None
 
-
 def hash_canonico(ficha: dict[str, Any]) -> str:
     """sha256 del JSON canónico (claves ordenadas, sin espacios).
     Estable ante reordenamiento de claves."""
@@ -134,10 +136,10 @@ def hash_canonico(ficha: dict[str, Any]) -> str:
     )
     return hashlib.sha256(canonico.encode("utf-8")).hexdigest()
 
-
 # ---------------------------------------------------------------------------
 # Ficha: estado_ciudad
 # ---------------------------------------------------------------------------
+
 def _lecturas_recientes(db: Session, ahora: datetime) -> list[Any]:
     """Lecturas de estaciones activas dentro de la ventana D31."""
     desde = ahora - timedelta(days=VENTANA_ACTIVIDAD_DIAS)
@@ -149,7 +151,6 @@ def _lecturas_recientes(db: Session, ahora: datetime) -> list[Any]:
         .join(Lectura, Lectura.estacion_id == Estacion.id)
         .where(Estacion.activa.is_(True), Lectura.medido_en >= desde)
     ).all()
-
 
 def _agrupar_por_ciudad(filas: list[Any]) -> dict[str, dict[str, Any]]:
     """Agrupa por ciudad y, dentro, por (contaminante, unidad). Por estación
@@ -179,7 +180,6 @@ def _agrupar_por_ciudad(filas: list[Any]) -> dict[str, dict[str, Any]]:
             bucket["ultimo_medido_en"] = fila.medido_en
     return por_ciudad
 
-
 def _categoria_para(contaminante: str, valor: float, unidad: str) -> Optional[str]:
     """Categoría AQI cualitativa, si se puede derivar del valor."""
     if unidad.strip().lower() == "aqi" or contaminante == "aqi":
@@ -191,14 +191,11 @@ def _categoria_para(contaminante: str, valor: float, unidad: str) -> Optional[st
         return categoria_aqi(convertido)
     return None
 
-
 def _formato_utc(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-
 def _formato_local(dt: datetime) -> str:
     return dt.astimezone(OFFSET_COLOMBIA).strftime("%Y-%m-%d %H:%M -05")
-
 
 def construir_ficha_estado_ciudad(
     db: Session, alcance: str, *, ahora: Optional[datetime] = None
@@ -209,7 +206,6 @@ def construir_ficha_estado_ciudad(
     fecha_ref = _fecha_local(ahora)
     filas = _lecturas_recientes(db, ahora)
     por_ciudad = _agrupar_por_ciudad(filas)
-
     if alcance != CIUDAD_GLOBAL:
         por_ciudad = {alcance: por_ciudad[alcance]} if alcance in por_ciudad else {}
 
@@ -246,7 +242,6 @@ def construir_ficha_estado_ciudad(
     atribuciones = sorted(
         ATRIBUCIONES[f] for f in fuentes_totales if f in ATRIBUCIONES
     )
-
     return {
         "tipo": "estado_ciudad",
         "alcance": alcance,
@@ -261,10 +256,10 @@ def construir_ficha_estado_ciudad(
         "atribuciones": atribuciones,
     }
 
-
 # ---------------------------------------------------------------------------
 # Ficha: auditoria_pronostico
 # ---------------------------------------------------------------------------
+
 def _conteos_auditoria(
     db: Session, *, desde_mes: date, hasta_mes: date
 ) -> dict[str, int]:
@@ -295,7 +290,6 @@ def _conteos_auditoria(
             conteos["sin_datos"] += 1
     return conteos
 
-
 def _horizonte_maximo(db: Session) -> int:
     """Máximo `fecha_objetivo - fecha_captura` presente en `pronosticos`."""
     filas = db.execute(
@@ -304,7 +298,6 @@ def _horizonte_maximo(db: Session) -> int:
     if not filas:
         return 0
     return max((f.fecha_objetivo - f.fecha_captura).days for f in filas)
-
 
 def _errores_por_contaminante_y_horizonte(
     db: Session, *, min_dias: int
@@ -327,7 +320,6 @@ def _errores_por_contaminante_y_horizonte(
             AuditoriaPronostico.error_abs.is_not(None),
         )
     ).all()
-
     grupos: dict[tuple[str, int], dict[str, Any]] = {}
     for fila in filas:
         horiz = (fila.fecha_objetivo - fila.fecha_captura).days
@@ -356,7 +348,6 @@ def _errores_por_contaminante_y_horizonte(
         resultado.append(item)
     return resultado
 
-
 def construir_ficha_auditoria_pronostico(
     db: Session,
     alcance: str = CIUDAD_GLOBAL,
@@ -375,13 +366,11 @@ def construir_ficha_auditoria_pronostico(
     fecha_ref = _fecha_local(ahora)
     mes_str = mes if mes is not None else _mes_local(ahora)
     desde_mes, hasta_mes = _rango_de_mes(mes_str)
-
     conteos = _conteos_auditoria(db, desde_mes=desde_mes, hasta_mes=hasta_mes)
     horizonte_max = _horizonte_maximo(db)
     errores = _errores_por_contaminante_y_horizonte(
         db, min_dias=settings.MIN_DIAS_AUDITADOS_PARA_PROMEDIO
     )
-
     return {
         "tipo": "auditoria_pronostico",
         "alcance": alcance,
@@ -403,10 +392,10 @@ def construir_ficha_auditoria_pronostico(
         "atribuciones": [ATRIBUCIONES["open-meteo"], ATRIBUCIONES["aqicn"]],
     }
 
-
 # ---------------------------------------------------------------------------
 # Plantillas determinísticas (fallback sin Gemini)
 # ---------------------------------------------------------------------------
+
 def plantilla_estado_ciudad(ficha: dict[str, Any]) -> str:
     """Narra una ficha `estado_ciudad` sin IA. No agrega cifras fuera de la ficha."""
     fecha = ficha["fecha_referencia"]
@@ -416,13 +405,11 @@ def plantilla_estado_ciudad(ficha: dict[str, Any]) -> str:
             f"Reporte de estado del aire — {fecha}. "
             "No hay datos disponibles con la cobertura actual del sistema."
         )
-
     parrafos: list[str] = []
     encabezado = f"Reporte de estado del aire — {fecha}."
     if ficha["alcance"] == CIUDAD_GLOBAL:
         encabezado += " Cobertura: " + ", ".join(c["nombre"] for c in ciudades) + "."
     parrafos.append(encabezado)
-
     for ciudad in ciudades:
         nombre = ciudad["nombre"]
         conts = ciudad["contaminantes"]
@@ -442,12 +429,10 @@ def plantilla_estado_ciudad(ficha: dict[str, Any]) -> str:
             f"Fuentes: {', '.join(ciudad['fuentes_aportantes'])}. "
             f"Dato más reciente: {reciente}."
         )
-
     parrafos.append("Limitaciones: " + " ".join(ficha.get("limitaciones", [])))
     if ficha.get("atribuciones"):
         parrafos.append("Fuentes: " + " ".join(ficha["atribuciones"]) + ".")
     return "\n\n".join(parrafos)
-
 
 def plantilla_auditoria_pronostico(ficha: dict[str, Any]) -> str:
     """Narra una ficha `auditoria_pronostico` sin IA. No agrega cifras
@@ -487,16 +472,15 @@ def plantilla_auditoria_pronostico(ficha: dict[str, Any]) -> str:
                     f"{settings.MIN_DIAS_AUDITADOS_PARA_PROMEDIO} requeridos)"
                 )
         parrafos.append(" ".join(partes) + ".")
-
     parrafos.append("Limitaciones: " + " ".join(ficha.get("limitaciones", [])))
     if ficha.get("atribuciones"):
         parrafos.append("Fuentes: " + " ".join(ficha["atribuciones"]) + ".")
     return "\n\n".join(parrafos)
 
-
 # ---------------------------------------------------------------------------
 # Orquestador (Bloque 5 sub-pieza 4)
 # ---------------------------------------------------------------------------
+
 @dataclass
 class ResumenReporte:
     """Resultado de generar (o reutilizar) UN reporte."""
@@ -523,7 +507,6 @@ class ResumenReporte:
             "llamadas_ia": self.llamadas_ia,
         }
 
-
 def _resumen_de(r: Reporte, *, nuevo: bool) -> ResumenReporte:
     return ResumenReporte(
         tipo=r.tipo,
@@ -538,7 +521,6 @@ def _resumen_de(r: Reporte, *, nuevo: bool) -> ResumenReporte:
         texto=r.texto,
     )
 
-
 def _llamadas_hoy(db: Session, ahora: datetime) -> int:
     """Solicitudes HTTP a Gemini ya gastadas en el día local (D73). Se
     suman los `llamadas_ia` de los reportes con la misma `fecha_referencia`
@@ -549,7 +531,6 @@ def _llamadas_hoy(db: Session, ahora: datetime) -> int:
         .where(Reporte.fecha_referencia == hoy)
     ).scalar()
     return int(suma or 0)
-
 
 def _buscar_reporte(
     db: Session, tipo: str, alcance: str, fecha_referencia: date, hash_datos: str
@@ -562,7 +543,6 @@ def _buscar_reporte(
             Reporte.hash_datos == hash_datos,
         )
     ).scalar_one_or_none()
-
 
 def _persistir(
     db: Session,
@@ -597,7 +577,6 @@ def _persistir(
     db.refresh(r)
     return r
 
-
 def _ficha_y_plantilla(
     db: Session, tipo: str, alcance: str, ahora: datetime
 ) -> tuple[dict[str, Any], str]:
@@ -611,7 +590,6 @@ def _ficha_y_plantilla(
         f"tipo de reporte desconocido: {tipo!r} (válidos: estado_ciudad, auditoria_pronostico)"
     )
 
-
 def generar_reporte(
     db: Session,
     tipo: str,
@@ -620,6 +598,7 @@ def generar_reporte(
     forzar_plantilla: bool = False,
     ahora: Optional[datetime] = None,
     cliente: Optional[ClienteGemini] = None,
+    deadline: Optional[float] = None,
 ) -> ResumenReporte:
     """Genera (o reutiliza) UN reporte del `tipo` y `alcance` indicados.
 
@@ -630,6 +609,10 @@ def generar_reporte(
       `motivo_fallback='forzado'`, sin llamar a Gemini.
     - `cliente` inyectable para tests; en uso normal se deja en None y el
       orquestador abre y cierra un `ClienteGemini`.
+    - `deadline` (M11.1, D98): instante `time.monotonic()` recibido del
+      orquestador. Se pasa tal cual a `ClienteGemini.generar`, que corta
+      la cascada al alcanzarlo y devuelve `motivo_fallo='timeout'`. Si
+      es None, el cliente no aplica presupuesto (comportamiento previo).
     """
     ahora = ahora or utcnow()
     fecha_referencia = _fecha_local(ahora)
@@ -688,13 +671,13 @@ def generar_reporte(
         resultado = c.generar(
             INSTRUCCION_SISTEMA,
             json.dumps(ficha, ensure_ascii=False),
+            deadline=deadline,
         )
     finally:
         if cliente_propio:
             c.close()
 
     llamadas = resultado.llamadas_gastadas
-
     if resultado.exito and resultado.texto is not None:
         motivo_validacion = validar(resultado.texto, ficha)
         if motivo_validacion is None:
@@ -724,7 +707,6 @@ def generar_reporte(
     )
     return _resumen_de(r, nuevo=True)
 
-
 def _alcances_disponibles(db: Session, tipo: str, ahora: datetime) -> list[str]:
     """Lista de alcances posibles para ese tipo.
 
@@ -739,7 +721,6 @@ def _alcances_disponibles(db: Session, tipo: str, ahora: datetime) -> list[str]:
         por_ciudad = _agrupar_por_ciudad(filas)
         return [CIUDAD_GLOBAL] + sorted(por_ciudad.keys())
     raise ValueError(f"tipo de reporte desconocido: {tipo!r}")
-
 
 @dataclass
 class ResumenGeneracion:
@@ -761,7 +742,6 @@ class ResumenGeneracion:
             "reportes": [r.a_dict() for r in self.reportes],
         }
 
-
 def generar_reportes(
     db: Session,
     *,
@@ -775,10 +755,25 @@ def generar_reportes(
 
     - `tipo=None`: ambos tipos (`estado_ciudad`, `auditoria_pronostico`).
     - `alcance=None`: todos los alcances disponibles para cada tipo.
-
     Devuelve un `ResumenGeneracion` con el agregado y el detalle por reporte.
+
+    Presupuesto global (M11.1, D98): se calcula UN deadline al arrancar la
+    función, ANTES del loop de tipos/alcances, y se pasa idéntico a cada
+    `generar_reporte`. Es un presupuesto para TODA la corrida (los 4
+    reportes juntos), no uno por reporte. Cuando se cumple, los reportes
+    que quedan caen a plantilla con `motivo_fallback='timeout'` sin
+    llamar a Gemini.
+
+    `time.monotonic()` (no `time.time()`): no le importa la hora del
+    reloj del sistema, solo que el tiempo avance siempre hacia adelante.
+    Un cambio de hora del servidor no puede romper el cálculo.
     """
     ahora = ahora or utcnow()
+    # M11.1 (D98): deadline global, calculado UNA sola vez. Cualquier
+    # reporte que todavía no haya salido por caché / forzado / sin_clave
+    # / cuota_diaria va a ver este mismo instante como techo.
+    deadline = time.monotonic() + settings.GEMINI_BUDGET_TOTAL_S
+
     tipos = [tipo] if tipo is not None else list(("estado_ciudad", "auditoria_pronostico"))
     resumen = ResumenGeneracion()
     for t in tipos:
@@ -789,6 +784,7 @@ def generar_reportes(
                 forzar_plantilla=forzar_plantilla,
                 ahora=ahora,
                 cliente=cliente,
+                deadline=deadline,
             )
             resumen.reportes.append(r)
             resumen.totales += 1

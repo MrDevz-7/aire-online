@@ -1,5 +1,6 @@
 """
-Tests de services/reportes.py (M6).
+Tests de services/reportes.py (M6 + deadline de M11.1).
+
 Estrategia:
   - Hash canónico y plantillas: unitarios puros, sin base ni red.
   - Fichas (agrupación y conteos): unitarios con `mock.patch`, porque la
@@ -10,26 +11,32 @@ Estrategia:
     prefijo `TEST_M6_REP_` en `alcance`. `setUp`/`tearDown` borran todo
     lo que tenga ese prefijo. El cliente Gemini se inyecta con un doble
     simple; no se toca la red.
-Nota para M13 (módulo de tests del proyecto): revisar esta decisión de
-mock vs. BD real. Si M13 adopta un patrón distinto (BD real con prefijo
-TEST_M6_REP_, o migración a pytest + carpeta tests/), migrar este archivo
-a ese patrón.
+  - M11.1 (D98): presupuesto de tiempo global. `generar_reportes` calcula
+    UN deadline y lo propaga a cada `generar_reporte`, que a su vez lo
+    pasa a `ClienteGemini.generar`.
+
 Se corren con:
     cd engine
     python -m unittest services.test_reportes -v
 """
 from __future__ import annotations
+
 import re
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
+
 from sqlalchemy import delete
+
 from analyzer.gemini_client import ResultadoGemini
+from database.config import settings
 from database.models import Reporte
 from database.session import SessionLocal
 from services.reportes import (
     CIUDAD_GLOBAL,
+    ResumenReporte,
     construir_ficha_auditoria_pronostico,
     construir_ficha_estado_ciudad,
     generar_reporte,
@@ -38,10 +45,13 @@ from services.reportes import (
     plantilla_auditoria_pronostico,
     plantilla_estado_ciudad,
 )
+
 HOY_FIJO = datetime(2026, 10, 4, 17, 0, tzinfo=timezone.utc)  # 12:00 local
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 def _fila(
     id_: int, fuente: str, nombre: str, contaminante: str,
     valor: float, unidad: str, medido_en: datetime,
@@ -50,37 +60,46 @@ def _fila(
         id=id_, fuente=fuente, nombre=nombre, contaminante=contaminante,
         valor=valor, unidad=unidad, medido_en=medido_en,
     )
+
 def _normalizar_numero(s: str) -> str:
     """Saca signo y ceros a la derecha: '3.210' -> '3.21'; '-3.21' -> '3.21'."""
     s = s.lstrip("-+")
     if "." in s:
         s = s.rstrip("0").rstrip(".")
     return s or "0"
+
 # ---------------------------------------------------------------------------
 # Hash canónico (puro)
 # ---------------------------------------------------------------------------
+
 class TestHashCanonico(unittest.TestCase):
     def test_mismo_contenido_distinto_orden_mismo_hash(self) -> None:
         a = {"b": 2, "a": 1, "c": [3, 4]}
         b = {"a": 1, "c": [3, 4], "b": 2}
         self.assertEqual(hash_canonico(a), hash_canonico(b))
+
     def test_anidado_con_distinto_orden_mismo_hash(self) -> None:
         a = {"outer": {"y": 2, "x": 1}}
         b = {"outer": {"x": 1, "y": 2}}
         self.assertEqual(hash_canonico(a), hash_canonico(b))
+
     def test_contenido_distinto_hash_distinto(self) -> None:
         self.assertNotEqual(hash_canonico({"v": 10}), hash_canonico({"v": 11}))
+
     def test_hash_es_sha256_hex(self) -> None:
         h = hash_canonico({"x": 1})
         self.assertEqual(len(h), 64)
         int(h, 16)
+
     def test_orden_de_lista_importa(self) -> None:
         self.assertNotEqual(
             hash_canonico({"xs": [1, 2, 3]}), hash_canonico({"xs": [3, 2, 1]})
         )
+
 # ---------------------------------------------------------------------------
 # Plantillas (puras)
 # ---------------------------------------------------------------------------
+
 def _ficha_estado_ciudad_ejemplo(**overrides) -> dict:
     ficha = {
         "tipo": "estado_ciudad",
@@ -112,6 +131,7 @@ def _ficha_estado_ciudad_ejemplo(**overrides) -> dict:
     }
     ficha.update(overrides)
     return ficha
+
 def _ficha_auditoria_ejemplo(**overrides) -> dict:
     ficha = {
         "tipo": "auditoria_pronostico",
@@ -144,21 +164,26 @@ def _ficha_auditoria_ejemplo(**overrides) -> dict:
     }
     ficha.update(overrides)
     return ficha
+
 def _numeros_del_texto(texto: str) -> set[str]:
     """Extrae los números del texto, normalizados (sin signo, sin ceros a
     la derecha), para compararlos contra los de la ficha."""
     return {_normalizar_numero(n) for n in re.findall(r"\d+(?:\.\d+)?", texto)}
+
 def _numeros_de_la_ficha(ficha: dict) -> set[str]:
     """Todos los números que aparecen en la ficha serializada."""
     return {_normalizar_numero(n) for n in re.findall(r"\d+(?:\.\d+)?", str(ficha))}
+
 class TestPlantillaEstadoCiudad(unittest.TestCase):
     def test_incluye_cifras_de_la_ficha(self) -> None:
         texto = plantilla_estado_ciudad(_ficha_estado_ciudad_ejemplo())
         for esperado in ("18.5", "42.0", "Moderada", "Buena", "12"):
             self.assertIn(esperado, texto)
+
     def test_sin_ciudades_devuelve_aviso(self) -> None:
         texto = plantilla_estado_ciudad(_ficha_estado_ciudad_ejemplo(ciudades=[]))
         self.assertIn("No hay datos", texto)
+
     def test_no_inventa_numeros(self) -> None:
         ficha = _ficha_estado_ciudad_ejemplo()
         texto = plantilla_estado_ciudad(ficha)
@@ -169,23 +194,28 @@ class TestPlantillaEstadoCiudad(unittest.TestCase):
             sobrantes,
             msg=f"números en el texto que no están en la ficha: {sobrantes}",
         )
+
 class TestPlantillaAuditoriaPronostico(unittest.TestCase):
     def test_incluye_conteos_y_horizonte(self) -> None:
         texto = plantilla_auditoria_pronostico(_ficha_auditoria_ejemplo())
         for esperado in ("100", "40", "30", "20", "10", "3 días"):
             self.assertIn(esperado, texto)
+
     def test_muestra_suficiente_reporta_error(self) -> None:
         texto = plantilla_auditoria_pronostico(_ficha_auditoria_ejemplo())
         self.assertIn("12.34", texto)
         self.assertIn("5 días auditados", texto)
+
     def test_muestra_insuficiente_dice_el_motivo(self) -> None:
         texto = plantilla_auditoria_pronostico(_ficha_auditoria_ejemplo())
         self.assertIn("todavía no hay suficientes días auditados", texto)
         self.assertNotIn("pm25 (horizonte 2 días): error absoluto promedio", texto)
+
     def test_sin_errores_dice_que_no_hay(self) -> None:
         ficha = _ficha_auditoria_ejemplo(errores_por_contaminante_y_horizonte=[])
         texto = plantilla_auditoria_pronostico(ficha)
         self.assertIn("Todavía no hay errores", texto)
+
     def test_no_inventa_numeros(self) -> None:
         ficha = _ficha_auditoria_ejemplo()
         texto = plantilla_auditoria_pronostico(ficha)
@@ -196,15 +226,19 @@ class TestPlantillaAuditoriaPronostico(unittest.TestCase):
             sobrantes,
             msg=f"números en el texto que no están en la ficha: {sobrantes}",
         )
+
 # ---------------------------------------------------------------------------
 # Fichas: simulan la base con mock (deterministas, sin datos reales)
 # ---------------------------------------------------------------------------
+
 class TestFichaEstadoCiudad(unittest.TestCase):
     """Los tests simulan `_lecturas_recientes` con `mock.patch`. Así no
     dependen de que la base tenga o no datos reales."""
+
     def _ficha_con_filas(self, filas, alcance="Bogotá"):
         with patch("services.reportes._lecturas_recientes", return_value=filas):
             return construir_ficha_estado_ciudad(None, alcance, ahora=HOY_FIJO)
+
     def test_agrupa_por_ciudad_y_categoriza(self) -> None:
         filas = [
             _fila(1, "aqicn", "Usaquén, Bogotá, Colombia", "pm25", 75.0, "AQI", HOY_FIJO),
@@ -217,12 +251,12 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         ciudad = ficha["ciudades"][0]
         self.assertEqual(ciudad["nombre"], "Bogotá")
         self.assertEqual(ciudad["estaciones_activas"], 2)
-        # Promedio de 75 y 85 -> 80
         conts = {c["contaminante"]: c for c in ciudad["contaminantes"]}
         self.assertIn("pm25", conts)
         self.assertAlmostEqual(conts["pm25"]["valor"], 80.0, places=3)
         self.assertEqual(conts["pm25"]["categoria_aqi"], "Moderada")
         self.assertEqual(conts["pm25"]["n_estaciones"], 2)
+
     def test_global_incluye_varias_ciudades(self) -> None:
         filas = [
             _fila(1, "aqicn", "Bogotá, Colombia", "pm25", 50.0, "AQI", HOY_FIJO),
@@ -231,17 +265,18 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         ficha = self._ficha_con_filas(filas, alcance=CIUDAD_GLOBAL)
         nombres = {c["nombre"] for c in ficha["ciudades"]}
         self.assertEqual(nombres, {"Bogotá", "Medellín"})
+
     def test_ciudad_desconocida_no_aparece(self) -> None:
-        # Nombre que no matchea ninguna ciudad conocida: se descarta.
         filas = [_fila(1, "aqicn", "Random Station", "pm25", 50.0, "AQI", HOY_FIJO)]
         ficha = self._ficha_con_filas(filas, alcance=CIUDAD_GLOBAL)
         self.assertEqual(ficha["ciudades"], [])
+
     def test_alcance_ciudad_inexistente_devuelve_vacio(self) -> None:
         filas = [_fila(1, "aqicn", "Bogotá, Colombia", "pm25", 50.0, "AQI", HOY_FIJO)]
         ficha = self._ficha_con_filas(filas, alcance="Cali")
         self.assertEqual(ficha["ciudades"], [])
+
     def test_ultima_lectura_por_estacion(self) -> None:
-        # Dos lecturas de la MISMA estación: solo cuenta la más reciente.
         mas_vieja = HOY_FIJO - timedelta(hours=3)
         filas = [
             _fila(1, "aqicn", "Bogotá, Colombia", "pm25", 30.0, "AQI", mas_vieja),
@@ -249,12 +284,11 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         ]
         ficha = self._ficha_con_filas(filas)
         ciudad = ficha["ciudades"][0]
-        # Solo la más reciente (90) cuenta: n_estaciones=1, valor=90.
         conts = {c["contaminante"]: c for c in ciudad["contaminantes"]}
         self.assertEqual(conts["pm25"]["n_estaciones"], 1)
         self.assertAlmostEqual(conts["pm25"]["valor"], 90.0, places=3)
+
     def test_unidades_distintas_mismo_contaminante_no_se_mezclan(self) -> None:
-        # AQICN mide pm25 en AQI; OpenAQ en µg/m³. Se agrupan por separado.
         filas = [
             _fila(1, "aqicn", "Bogotá, Colombia", "pm25", 75.0, "AQI", HOY_FIJO),
             _fila(2, "openaq", "Bogotá, Colombia", "pm25", 18.5, "µg/m³", HOY_FIJO),
@@ -263,6 +297,7 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         ciudad = ficha["ciudades"][0]
         unidades = {c["unidad"] for c in ciudad["contaminantes"]}
         self.assertEqual(unidades, {"AQI", "µg/m³"})
+
     def test_atribucion_aqicn_aparece_cuando_aporta_datos(self) -> None:
         """Bloque 4.5: la atribución completa de AQICN aparece cuando la
         fuente aporta datos, y no aparece cuando no aporta."""
@@ -274,21 +309,18 @@ class TestFichaEstadoCiudad(unittest.TestCase):
         self.assertIn("World Air Quality Index Project", texto_con)
         self.assertIn("aqicn.org", texto_con)
         self.assertIn("agencias de origen", texto_con)
+
         sin_aqicn = [
             _fila(2, "openaq", "Bogotá, Colombia", "pm25", 18.5, "µg/m³", HOY_FIJO),
         ]
         ficha_sin = self._ficha_con_filas(sin_aqicn)
         texto_sin = " ".join(ficha_sin["atribuciones"])
         self.assertNotIn("World Air Quality Index Project", texto_sin)
+
 class TestFichaAuditoria(unittest.TestCase):
     """Los tests simulan las dos consultas de la ficha con mock.patch."""
-    def _ficha(
-        self,
-        *,
-        conteos=None,
-        horizonte=3,
-        errores=None,
-    ):
+
+    def _ficha(self, *, conteos=None, horizonte=3, errores=None):
         conteos = conteos or {
             "capturados": 0, "pendientes": 0, "calculadas": 0,
             "no_auditable": 0, "sin_datos": 0,
@@ -299,6 +331,7 @@ class TestFichaAuditoria(unittest.TestCase):
              patch("services.reportes._errores_por_contaminante_y_horizonte",
                    return_value=errores):
             return construir_ficha_auditoria_pronostico(None, ahora=HOY_FIJO)
+
     def test_mes_y_conteos(self) -> None:
         ficha = self._ficha(
             conteos={
@@ -315,6 +348,7 @@ class TestFichaAuditoria(unittest.TestCase):
         self.assertEqual(
             ficha["contaminantes_no_auditables"], ["o3", "no2", "so2", "co"]
         )
+
     def test_muestra_insuficiente_no_expone_error(self) -> None:
         errores = [{
             "contaminante": "pm25", "horizonte": 2, "dias_auditados": 1,
@@ -324,6 +358,7 @@ class TestFichaAuditoria(unittest.TestCase):
         item = ficha["errores_por_contaminante_y_horizonte"][0]
         self.assertFalse(item["muestra_suficiente"])
         self.assertNotIn("error_abs_promedio", item)
+
     def test_muestra_suficiente_expone_error(self) -> None:
         errores = [{
             "contaminante": "aqi", "horizonte": 1, "dias_auditados": 5,
@@ -334,6 +369,7 @@ class TestFichaAuditoria(unittest.TestCase):
         item = ficha["errores_por_contaminante_y_horizonte"][0]
         self.assertTrue(item["muestra_suficiente"])
         self.assertEqual(item["error_abs_promedio"], 12.34)
+
     def test_atribuciones_incluyen_fuente_real(self) -> None:
         """La ficha debe atribuir tanto a Open-Meteo (fuente del pronóstico)
         como a AQICN (fuente de las lecturas reales contra las que se compara,
@@ -343,10 +379,13 @@ class TestFichaAuditoria(unittest.TestCase):
         self.assertIn("Copernicus Atmosphere Monitoring Service (CAMS)", atribuciones_texto)
         self.assertIn("World Air Quality Index Project", atribuciones_texto)
         self.assertEqual(len(ficha["atribuciones"]), 2)
+
 # ---------------------------------------------------------------------------
 # Orquestador (BD real con prefijo TEST_M6_REP_, cliente Gemini doble)
 # ---------------------------------------------------------------------------
+
 PREFIJO_ALCANCE = "TEST_M6_REP_"
+
 _FICHA_FIJA = {
     "tipo": "estado_ciudad",
     "alcance": "TEST_M6_REP_1",
@@ -355,31 +394,51 @@ _FICHA_FIJA = {
     "limitaciones": ["limitación de prueba"],
     "atribuciones": [],
 }
+
 def _limpiar_reportes(db) -> None:
     db.execute(delete(Reporte).where(Reporte.alcance.like(f"{PREFIJO_ALCANCE}%")))
     db.commit()
+
 class _ClienteFalso:
     """Doble de `ClienteGemini` para tests. No toca red: devuelve el
     `ResultadoGemini` que se le indique y cuenta las veces que se llamó."""
+
     def __init__(self, resultado: ResultadoGemini) -> None:
         self._resultado = resultado
         self.n_llamadas = 0
+
     def generar(self, *args, **kwargs) -> ResultadoGemini:  # noqa: ANN002, ANN003
         self.n_llamadas += 1
         return self._resultado
-    def close(self) -> None:  # por si algún test lo cierra
+
+    def close(self) -> None:
         pass
+
+def _resumen_dummy(tipo: str, alcance: str) -> ResumenReporte:
+    """Helper para el test de propagación de deadline: un `ResumenReporte`
+    mínimo que cumple con lo que `generar_reportes` inspecciona."""
+    return ResumenReporte(
+        tipo=tipo, alcance=alcance,
+        fecha_referencia=HOY_FIJO.date(), hash_datos="x",
+        nuevo=True, origen_texto="plantilla",
+        motivo_fallback="timeout", modelo=None, llamadas_ia=0, texto="",
+    )
+
 class TestOrquestador(unittest.TestCase):
     """Usa BD real y un cliente Gemini inyectado. `alcance` con prefijo
     TEST_M6_REP_ para limpiar sin tocar filas reales."""
+
     def setUp(self) -> None:
         self.db = SessionLocal()
         _limpiar_reportes(self.db)
+
     def tearDown(self) -> None:
         _limpiar_reportes(self.db)
         self.db.close()
+
     def _alcance(self) -> str:
         return f"{PREFIJO_ALCANCE}1"
+
     def _patch_ficha(self):
         """Context manager que fuerza a `_ficha_y_plantilla` a devolver una
         ficha fija. Se usa `patch` sobre la función que la construye."""
@@ -387,6 +446,7 @@ class TestOrquestador(unittest.TestCase):
             "services.reportes.construir_ficha_estado_ciudad",
             return_value=dict(_FICHA_FIJA, alcance=self._alcance()),
         )
+
     def test_exito_gemini_persiste_con_origen_y_llamadas(self) -> None:
         resultado = ResultadoGemini(
             texto="Reporte de prueba sin cifras.",
@@ -407,6 +467,7 @@ class TestOrquestador(unittest.TestCase):
         self.assertIsNone(r.motivo_fallback)
         self.assertEqual(r.texto, "Reporte de prueba sin cifras.")
         self.assertEqual(cliente.n_llamadas, 1)
+
     def test_idempotencia_no_llama_segunda_vez(self) -> None:
         resultado = ResultadoGemini(
             texto="Reporte de prueba.", modelo="modelo-test",
@@ -423,9 +484,10 @@ class TestOrquestador(unittest.TestCase):
                 ahora=HOY_FIJO, cliente=cliente,
             )
         self.assertTrue(r1.nuevo)
-        self.assertFalse(r2.nuevo)  # reutilizado
-        self.assertEqual(cliente.n_llamadas, 1)  # segunda vez: cacheado
+        self.assertFalse(r2.nuevo)
+        self.assertEqual(cliente.n_llamadas, 1)
         self.assertEqual(r1.hash_datos, r2.hash_datos)
+
     def test_forzar_plantilla_no_llama_y_usa_motivo_forzado(self) -> None:
         resultado = ResultadoGemini(
             texto="texto que no debería usarse", modelo="m",
@@ -441,6 +503,7 @@ class TestOrquestador(unittest.TestCase):
         self.assertEqual(r.motivo_fallback, "forzado")
         self.assertEqual(r.llamadas_ia, 0)
         self.assertEqual(cliente.n_llamadas, 0)
+
     def test_sin_clave_usa_plantilla(self) -> None:
         resultado = ResultadoGemini(
             texto="no debería usarse", modelo="m",
@@ -457,6 +520,7 @@ class TestOrquestador(unittest.TestCase):
         self.assertEqual(r.motivo_fallback, "sin_clave")
         self.assertEqual(r.llamadas_ia, 0)
         self.assertEqual(cliente.n_llamadas, 0)
+
     def test_cuota_agotada_usa_plantilla_sin_llamar(self) -> None:
         resultado = ResultadoGemini(
             texto="no debería usarse", modelo="m",
@@ -473,8 +537,8 @@ class TestOrquestador(unittest.TestCase):
         self.assertEqual(r.motivo_fallback, "cuota_diaria")
         self.assertEqual(r.llamadas_ia, 0)
         self.assertEqual(cliente.n_llamadas, 0)
+
     def test_validacion_numeros_cae_a_plantilla(self) -> None:
-        # Texto con un número que no está en la ficha.
         resultado = ResultadoGemini(
             texto="El valor fue 999.", modelo="m",
             llamadas_gastadas=1, motivo_fallo=None,
@@ -487,7 +551,8 @@ class TestOrquestador(unittest.TestCase):
             )
         self.assertEqual(r.origen_texto, "plantilla")
         self.assertEqual(r.motivo_fallback, "validacion_numeros")
-        self.assertEqual(r.llamadas_ia, 1)  # la llamada se gastó igual
+        self.assertEqual(r.llamadas_ia, 1)
+
     def test_validacion_texto_cae_a_plantilla(self) -> None:
         resultado = ResultadoGemini(
             texto="El sistema usa machine learning.", modelo="m",
@@ -502,6 +567,7 @@ class TestOrquestador(unittest.TestCase):
         self.assertEqual(r.origen_texto, "plantilla")
         self.assertEqual(r.motivo_fallback, "validacion_texto")
         self.assertEqual(r.llamadas_ia, 1)
+
     def test_falla_del_cliente_usa_su_motivo_y_llamadas(self) -> None:
         resultado = ResultadoGemini(
             texto=None, modelo=None,
@@ -516,6 +582,7 @@ class TestOrquestador(unittest.TestCase):
         self.assertEqual(r.origen_texto, "plantilla")
         self.assertEqual(r.motivo_fallback, "http_429")
         self.assertEqual(r.llamadas_ia, 2)
+
     def test_generar_reportes_itera_tipos_y_alcances(self) -> None:
         resultado = ResultadoGemini(
             texto="Reporte.", modelo="m", llamadas_gastadas=1, motivo_fallo=None,
@@ -534,5 +601,139 @@ class TestOrquestador(unittest.TestCase):
         self.assertEqual(resumen.nuevos, 1)
         self.assertEqual(resumen.reutilizados, 0)
         self.assertEqual(resumen.por_origen.get("gemini"), 1)
+
+    # ------------------------------------------------------------------
+    # M11.1 (D98): presupuesto de tiempo global
+    # ------------------------------------------------------------------
+
+    def test_deadline_vencido_cae_a_plantilla_timeout_sin_llamar_a_gemini(self) -> None:
+        """Con un deadline ya vencido, el reporte cae a plantilla con
+        motivo 'timeout' y NO se hace ninguna request a Gemini. Usa el
+        `ClienteGemini` REAL con un MockTransport que explota si algo
+        intenta salir a la red: es un test end-to-end del corte."""
+        import httpx
+        from analyzer.gemini_client import ClienteGemini
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError(
+                "con deadline vencido no debería llegar ninguna request"
+            )
+        cliente = ClienteGemini(
+            api_keys=["k"],
+            modelos=["modelo-A"],
+            espera_reintento_s=0.0,
+            transport=httpx.MockTransport(handler),
+        )
+        deadline_pasado = time.monotonic() - 1.0
+        with self._patch_ficha():
+            r = generar_reporte(
+                self.db, "estado_ciudad", self._alcance(),
+                ahora=HOY_FIJO, cliente=cliente, deadline=deadline_pasado,
+            )
+        cliente.close()
+        self.assertEqual(r.origen_texto, "plantilla")
+        self.assertEqual(r.motivo_fallback, "timeout")
+        self.assertEqual(r.llamadas_ia, 0)
+
+    def test_generar_reportes_calcula_deadline_una_vez_y_lo_propaga(self) -> None:
+        """El deadline se calcula UNA vez en `generar_reportes` y se pasa
+        idéntico a cada `generar_reporte`. Se verifica interceptando la
+        función interna: todos los deadlines recibidos son el mismo objeto."""
+        deadlines_recibidos: list[float | None] = []
+
+        def fake_generar_reporte(db, tipo, alcance, *, deadline=None, **kw):  # noqa: ANN001
+            deadlines_recibidos.append(deadline)
+            return _resumen_dummy(tipo, alcance)
+
+        with patch(
+            "services.reportes.generar_reporte",
+            side_effect=fake_generar_reporte,
+        ), patch(
+            "services.reportes._alcances_disponibles",
+            return_value=["global", "Bogotá", "Medellín"],
+        ):
+            generar_reportes(
+                self.db,
+                tipo="estado_ciudad",
+                ahora=HOY_FIJO,
+            )
+
+        self.assertEqual(len(deadlines_recibidos), 3)
+        # Todos los deadlines son el MISMO número: se calculó una vez.
+        self.assertIsNotNone(deadlines_recibidos[0])
+        for d in deadlines_recibidos:
+            self.assertEqual(d, deadlines_recibidos[0])
+
+    def test_corrida_completa_respeta_el_presupuesto_con_gemini_fallando(self) -> None:
+        """Con un presupuesto chico (0.5 s) y un cliente doble que simula
+        un Gemini degradado (0.3 s de latencia por intento, siempre fallo),
+        la corrida completa de `generar_reportes` termina dentro del
+        presupuesto más un margen. Al menos uno de los reportes cae con
+        motivo 'timeout': el corte por deadline se dispara.
+
+        Cota de tiempo: con el fix, ~0.6 s (2 reportes duermen 0.3 s cada
+        uno, los siguientes cortan por deadline); sin el fix, 4 × 0.3 s =
+        1.2 s. El umbral de 1.0 s detecta la regresión sin ser flaky."""
+        PRESUPUESTO_S = 0.5
+        LATENCIA_FAKE_S = 0.3
+
+        class ClienteLentoQueFalla:
+            """Cliente doble que respeta el deadline EXACTAMENTE como lo
+            hace `ClienteGemini` real: antes de cada intento, si ya venció,
+            devuelve `timeout`; si no, duerme un poco y devuelve fallo."""
+
+            def __init__(self) -> None:
+                self.n_llamadas = 0
+
+            def generar(self, *args, deadline=None, **kwargs):  # noqa: ANN002, ANN003, ANN001
+                if deadline is not None and time.monotonic() >= deadline:
+                    return ResultadoGemini(
+                        texto=None, modelo=None, llamadas_gastadas=0,
+                        motivo_fallo="timeout",
+                    )
+                time.sleep(LATENCIA_FAKE_S)
+                self.n_llamadas += 1
+                return ResultadoGemini(
+                    texto=None, modelo=None, llamadas_gastadas=1,
+                    motivo_fallo="error_api",
+                )
+
+            def close(self) -> None:
+                pass
+
+        cliente = ClienteLentoQueFalla()
+        with patch.object(settings, "GEMINI_BUDGET_TOTAL_S", PRESUPUESTO_S), \
+             patch(
+                 "services.reportes.construir_ficha_estado_ciudad",
+                 return_value=dict(_FICHA_FIJA, alcance=f"{PREFIJO_ALCANCE}1"),
+             ), \
+             patch(
+                 "services.reportes._alcances_disponibles",
+                 return_value=["global", "Bogotá", "Medellín", "Cali"],
+             ):
+            inicio = time.monotonic()
+            resumen = generar_reportes(
+                self.db, tipo="estado_ciudad",
+                ahora=HOY_FIJO, cliente=cliente,
+            )
+            duracion = time.monotonic() - inicio
+
+        # Los 4 reportes se generaron (algunos con timeout, otros con
+        # error_api). Todos cayeron a plantilla porque el cliente doble
+        # siempre falla.
+        self.assertEqual(len(resumen.reportes), 4)
+        for r in resumen.reportes:
+            self.assertEqual(r.origen_texto, "plantilla")
+        # Al menos uno de los reportes vio el deadline: la corrida completa
+        # tardó más que el presupuesto, así que los últimos cortan sin
+        # siquiera entrar a la latencia.
+        motivos = {r.motivo_fallback for r in resumen.reportes}
+        self.assertIn("timeout", motivos)
+        # Umbral GENEROSO: con el fix, ~0.6 s; sin el fix, ~1.2 s.
+        self.assertLess(
+            duracion, 1.0,
+            msg=f"duración {duracion:.3f}s superó el umbral de 1 s",
+        )
+
 if __name__ == "__main__":
     unittest.main()

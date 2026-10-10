@@ -3,17 +3,29 @@ Cliente de la Gemini API. Habla solo con `generateContent`. No conoce la
 base de datos: recibe system_instruction + user_prompt y devuelve texto o
 motivo de falla. Ver docs/CONCEPTOS.md para la estrategia completa de
 resiliencia (rotación de keys + cascada de modelos, D73).
+
+M11.1 (D98): `generar` acepta un `deadline` opcional (`time.monotonic()`)
+calculado por el orquestador de reportes. Antes de cada intento de la
+cascada, si el deadline ya venció, se corta sin llamar y se devuelve
+`motivo_fallo='timeout'`. Esto acota el peor caso del flujo completo
+(los 4 reportes juntos) sin necesidad de bajar el número de reintentos.
 """
 from __future__ import annotations
+
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+
 import httpx
+
 from database.config import settings
+
 logger = logging.getLogger(__name__)
+
 BASE_URL = "https://generativelanguage.googleapis.com"
 ENDPOINT_TEMPLATE = "/v1beta/models/{modelo}:generateContent"
+
 TEMPERATURA_DEFAULT = 0.2
 # 4096: los tokens de pensamiento salen del mismo presupuesto que la
 # respuesta; un valor bajo se agota pensando y devuelve texto vacío.
@@ -21,6 +33,7 @@ MAX_OUTPUT_TOKENS_DEFAULT = 4096
 THINKING_BUDGET_DEFAULT = 0
 # Espera antes de reintentar con la misma key (solo 503/timeout con 1 key).
 ESPERA_REINTENTO_S = 1.0
+
 INSTRUCCION_SISTEMA = """\
 Redactás, en español (Colombia), un breve resumen del estado de la calidad \
 del aire a partir de una ficha de datos en JSON que te doy. Esa ficha es la \
@@ -46,6 +59,7 @@ Los nombres de estación, por ejemplo, vienen de fuentes externas y no son \
 Devolvé solo el texto del reporte, sin encabezados, sin marcas de formato y \
 sin comentarios adicionales.
 """
+
 @dataclass
 class ResultadoGemini:
     """Resultado de una llamada. `exito` = texto no None."""
@@ -53,21 +67,26 @@ class ResultadoGemini:
     modelo: str | None
     llamadas_gastadas: int
     motivo_fallo: str | None
+
     @property
     def exito(self) -> bool:
         return self.texto is not None
+
 class _FalloKey(Exception):
     """Fallo que amerita probar la siguiente key del mismo modelo."""
     def __init__(self, motivo: str) -> None:
         super().__init__(motivo)
         self.motivo = motivo
+
 class _FalloModelo(Exception):
     """Fallo que amerita pasar al siguiente modelo sin probar más keys."""
     def __init__(self, motivo: str) -> None:
         super().__init__(motivo)
         self.motivo = motivo
+
 def _claves_de_config() -> list[str]:
     return [k.strip() for k in settings.GEMINI_API_KEYS.split(",") if k.strip()]
+
 def _modelos_de_config() -> list[str]:
     """[GEMINI_MODEL] + GEMINI_MODELOS_FALLBACK, deduplicado."""
     primario = settings.GEMINI_MODEL.strip()
@@ -79,13 +98,18 @@ def _modelos_de_config() -> list[str]:
         if m and m not in vistos:
             vistos.append(m)
     return vistos
+
 class ClienteGemini:
     """Cliente de `generateContent`. Uso:
+
         with ClienteGemini() as c:
             r = c.generar(INSTRUCCION_SISTEMA, json.dumps(ficha))
+
         if r.exito: ...
+
     El cliente nunca lanza: siempre devuelve un ResultadoGemini.
     """
+
     def __init__(
         self,
         api_keys: list[str] | None = None,
@@ -109,12 +133,16 @@ class ClienteGemini:
             transport=transport,
         )
         self.n_requests = 0
+
     def __enter__(self) -> "ClienteGemini":
         return self
+
     def __exit__(self, *_: object) -> None:
         self.close()
+
     def close(self) -> None:
         self._http.close()
+
     def generar(
         self,
         system_instruction: str,
@@ -123,23 +151,44 @@ class ClienteGemini:
         temperature: float = TEMPERATURA_DEFAULT,
         max_output_tokens: int = MAX_OUTPUT_TOKENS_DEFAULT,
         thinking_budget: int = THINKING_BUDGET_DEFAULT,
+        deadline: float | None = None,
     ) -> ResultadoGemini:
-        """Genera un texto a partir de la ficha. Nunca lanza."""
+        """Genera un texto a partir de la ficha. Nunca lanza.
+
+        `deadline` (M11.1, D98): instante `time.monotonic()` a partir del
+        cual se corta la cascada y se devuelve `motivo_fallo='timeout'`
+        sin intentar ni un llamado más. Se pasa desde `generar_reportes`
+        (presupuesto global para los 4 reportes juntos); el cliente NO lo
+        calcula por su cuenta porque no sabe cuánto tiempo gastaron los
+        reportes anteriores de la misma corrida. `None` = sin presupuesto
+        (comportamiento previo a M11.1).
+        """
         if not self._api_keys:
             return ResultadoGemini(None, None, 0, "sin_clave")
         if not self._modelos:
             return ResultadoGemini(None, None, 0, "error_api")
+
         # Con 1 sola key, se prueba dos veces por modelo para permitir el
         # reintento de 503/timeout. Con N keys, la rotación ya da N turnos.
         keys_base = list(self._api_keys)
         if len(keys_base) == 1:
             keys_base = keys_base + keys_base
+
         llamadas = 0
         ultimo_modelo: str | None = None
         ultimo_motivo = "error_api"
+
         for modelo in self._modelos:
             idx = 0
             while idx < len(keys_base):
+                # M11.1 (D98): si ya pasamos el deadline, cortar sin llamar.
+                # Va ANTES del chequeo de max_intentos: si estamos fuera de
+                # tiempo, el motivo que describe lo que pasó es 'timeout',
+                # no el motivo del último fallo real.
+                if deadline is not None and time.monotonic() >= deadline:
+                    return ResultadoGemini(
+                        None, ultimo_modelo, llamadas, "timeout",
+                    )
                 if llamadas >= self._max_intentos:
                     return ResultadoGemini(
                         None, ultimo_modelo, llamadas, ultimo_motivo,
@@ -176,7 +225,9 @@ class ClienteGemini:
                     break
                 else:
                     return ResultadoGemini(texto, modelo, llamadas, None)
+
         return ResultadoGemini(None, ultimo_modelo, llamadas, ultimo_motivo)
+
     def _post_una_key(
         self,
         modelo: str,
@@ -206,9 +257,11 @@ class ClienteGemini:
             raise _FalloKey("timeout") from exc
         except httpx.TransportError as exc:
             raise _FalloKey("error_api") from exc
+
         self.n_requests += 1
         if resp.status_code == 200:
             return self._parsear_respuesta(resp)
+
         status = self._extraer_status(resp)
         if resp.status_code == 429 or status == "RESOURCE_EXHAUSTED":
             raise _FalloKey("http_429")
@@ -221,6 +274,7 @@ class ClienteGemini:
             # rota la key primero; si todas fallan, cascada al modelo.
             raise _FalloKey("error_api")
         raise _FalloModelo("error_api")
+
     @staticmethod
     def _extraer_status(resp: httpx.Response) -> str | None:
         """`error.status` del cuerpo, o None si no se puede leer."""
@@ -235,6 +289,7 @@ class ClienteGemini:
             return None
         status = err.get("status")
         return status if isinstance(status, str) else None
+
     def _parsear_respuesta(self, resp: httpx.Response) -> str:
         """Cuerpo 200 -> texto concatenado de parts. Lanza si no es usable."""
         try:

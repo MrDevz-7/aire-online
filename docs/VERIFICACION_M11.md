@@ -378,3 +378,71 @@ Esperado: sin resultados. La config de Vercel (si existe) vive en el
 dashboard, fuera del árbol.
 
 ---
+
+## 11. Verificar el presupuesto de tiempo (D98, M11.1)
+
+**Objetivo:** confirmar que la corrida de `generar_reportes` no se cuelga indefinidamente cuando Gemini está degradado, y que cae a plantilla con motivo `timeout` en vez de esperar a que se agoten los 40 intentos × 60 s.
+
+**Nota:** forzar el escenario real (que Gemini devuelva 503/429 en TODAS las keys × todos los modelos durante la corrida) no es viable desde el navegador. La verificación se hace con un presupuesto muy chico, que dispara el mismo código.
+
+### 11.1 Vía manual: bajar el presupuesto a 2 s y disparar con Gemini degradado
+
+1. En `engine/.env`, agregar (o cambiar):
+
+   ```
+   GEMINI_BUDGET_TOTAL_S=2
+   ```
+
+2. Recrear el engine (NO alcanza con restart, ver G16 en M9):
+
+   ```powershell
+   cd C:\dev\aire-online
+   docker compose up -d --force-recreate engine
+   ```
+
+3. Desde la raíz del repo, disparar con curl:
+
+   ```powershell
+   $tok = (Select-String -Path engine/.env -Pattern '^INTERNAL_API_TOKEN=(.+)$').Matches.Groups[1].Value.Trim()
+   curl.exe -s -X POST -H "X-Internal-Token: $tok" `
+     "http://localhost:8000/internal/reportes/generar?tipo=estado_ciudad" `
+     -o generar.json
+   (Get-Content generar.json -Raw | ConvertFrom-Json).por_motivo_fallback
+   ```
+
+4. **Esperado:** entre los motivos de fallback, aparece `timeout` (junto a `cuota_diaria`, `http_429` o `error_api` si Gemini devolvió algo antes de que se acabara el presupuesto). El tiempo total del curl no supera los ~4 s (2 s de presupuesto + hasta 1 llamada en vuelo).
+
+5. Verificar en la base que el reporte quedó persistido con el motivo correcto:
+
+   ```powershell
+   docker compose exec postgres psql -U aire_online -d aire_online -c "SELECT tipo, alcance, origen_texto, motivo_fallback, llamadas_ia FROM reportes WHERE fecha_referencia = CURRENT_DATE ORDER BY id DESC LIMIT 5;"
+   ```
+
+### 11.2 Vía tests (sin tocar la base real)
+
+Los tests del cliente Gemini son **puros** (sin base, sin red): se pueden correr con el venv del engine activo.
+
+```powershell
+cd C:\dev\aire-online\engine
+venv\Scripts\Activate.ps1
+python -m unittest analyzer.test_gemini_client.TestDeadline -v
+```
+
+Los tests de `reportes` tocan la **base real** (usan `SessionLocal`), así que necesitan Docker corriendo. Lo más simple es correrlos dentro del contenedor:
+
+```powershell
+cd C:\dev\aire-online
+docker compose exec engine python -m unittest services.test_reportes.TestOrquestador.test_deadline_vencido_cae_a_plantilla_timeout_sin_llamar_a_gemini -v
+docker compose exec engine python -m unittest services.test_reportes.TestOrquestador.test_generar_reportes_calcula_deadline_una_vez_y_lo_propaga -v
+docker compose exec engine python -m unittest services.test_reportes.TestOrquestador.test_corrida_completa_respeta_el_presupuesto_con_gemini_fallando -v
+```
+
+Los 7 tests (4 del cliente + 3 del orquestador) deben pasar. El primero verifica que un deadline vencido no hace ninguna request; el último, que la corrida completa termina dentro del presupuesto cuando Gemini falla sistemáticamente.
+
+### 11.3 Al terminar
+
+Volver `GEMINI_BUDGET_TOTAL_S` a su valor normal (60) en `engine/.env` y recrear el engine:
+
+```powershell
+docker compose up -d --force-recreate engine
+```
