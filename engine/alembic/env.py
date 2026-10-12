@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.config import settings  # noqa: E402
 from database.models import Base  # noqa: E402
 
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
@@ -55,7 +56,17 @@ verificar_destino_local(settings.DATABASE_URL)
 
 # Sobreescribimos la URL de conexión del alembic.ini con la que viene de
 # nuestro .env (una sola fuente de verdad para la DATABASE_URL).
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+#
+# M12: escapa `%` como `%%` antes de pasarla a Alembic. Alembic usa
+# configparser por dentro, y configparser trata `%` como sintaxis de
+# interpolación (`%s`, `%(name)s`). Una URL con `%` (por ejemplo `%2B`
+# de una contraseña URL-encoded) rompe el arranque con
+# `ValueError: invalid interpolation syntax`. Duplicar `%` es la forma
+# estándar de escapar en configparser; Alembic lo revierte al leer, así
+# que SQLAlchemy recibe la URL original sin cambios.
+config.set_main_option(
+    "sqlalchemy.url", settings.DATABASE_URL.replace("%", "%%")
+)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

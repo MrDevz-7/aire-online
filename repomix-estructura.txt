@@ -1,0 +1,286 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+The content has been processed where empty lines have been removed.
+
+================================================================
+File Summary
+================================================================
+
+Purpose:
+--------
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+File Format:
+------------
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  a. A separator line (================)
+  b. The file path (File: path/to/file)
+  c. Another separator line
+  d. The full contents of the file
+  e. A blank line
+
+Usage Guidelines:
+-----------------
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+Notes:
+------
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: **/venv/**, **/__pycache__/**, *.pyc, **/node_modules/**, **/.next/**, **/dist/**, **/package-lock.json, **/.env*, repomix-*.xml, *_test_output.txt, *.tmp, email_draft_test.txt
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Empty lines have been removed from all files
+- Files are sorted by Git change count (files with more changes are at the bottom)
+
+
+================================================================
+Directory Structure
+================================================================
+docs/
+  API.md
+  CONCEPTOS.md
+  DECISIONES_TECNICAS.md
+  ESTADO_PROYECTO.md
+  INFORME_FINAL_MVP.md
+  MODELO_DATOS.md
+  RECICLAJE.md
+  VERIFICACION_M10.md
+  VERIFICACION_M11.md
+  VERIFICACION_M7.md
+  VERIFICACION_M8.md
+  VERIFICACION_M9.md
+engine/
+  alembic/
+    versions/
+      a7f3e1b9c2d4_m6_tabla_reportes.py
+      abdd7600fa23_agrega_pm1_iboca_siata.py
+      b25c29569656_unique_en_comparaciones_emparejamiento_.py
+      b8d5aefd9062_esquema_inicial_aire_online.py
+      c3a4e2f5b8d1_m5c_open_meteo_fuente_unidad_pronosticos.py
+      d8e2f9a4b1c5_m5c_horas_con_lectura_auditoria.py
+      d8e2f9a4b1c5b_m5c_no_auditable_estado.py
+      e5b7d9f1a3c8_m6_reportes_llamadas_ia.py
+      e8f2a4b6c1d3_m8_usuarios_sesiones_refresh.py
+    env.py
+    README
+    script.py.mako
+  analyzer/
+    _testdata/
+      gemini_error_auth.json
+      gemini_exito_estado_ciudad.json
+    __init__.py
+    gemini_client.py
+    test_gemini_client.py
+    test_validador_texto.py
+    validador_texto.py
+  api/
+    __init__.py
+    main.py
+    middleware.py
+    schemas.py
+    test_estado_alertas_auditoria.py
+    test_internal_middleware.py
+    test_lectura.py
+    test_main.py
+  database/
+    __init__.py
+    config.py
+    models.py
+    session.py
+  scheduler/
+    __init__.py
+    jobs.py
+    scheduler.py
+    test_jobs.py
+    test_scheduler.py
+  scrapers/
+    __init__.py
+  services/
+    __init__.py
+    alertas.py
+    aqi_escala.py
+    auditoria.py
+    geo.py
+    ingestion.py
+    lectura.py
+    pronosticos.py
+    reconciliacion.py
+    reportes.py
+    sesiones.py
+    test_alertas.py
+    test_aqi_escala.py
+    test_auditoria.py
+    test_lectura.py
+    test_pronosticos_agregacion.py
+    test_pronosticos_captura.py
+    test_reportes.py
+    test_sesiones.py
+    test_usuarios.py
+    usuarios.py
+  sources/
+    _testdata/
+      open_meteo_bogota_7d.json
+    __init__.py
+    aqicn.py
+    fuente_regional.py
+    geo.py
+    iboca.py
+    open_meteo.py
+    openaq.py
+    siata.py
+    tipos.py
+  .dockerignore
+  .env.docker-test.example
+  .env.example
+  .gitignore
+  alembic.ini
+  Dockerfile
+  README.md
+  requirements.txt
+frontend/
+  src/
+    app/
+      admin/
+        page.tsx
+      alertas/
+        page.tsx
+      analytics/
+        page.tsx
+      atribuciones/
+        page.tsx
+      auditoria/
+        page.tsx
+      estaciones/
+        [id]/
+          page.tsx
+        page.tsx
+      login/
+        page.tsx
+      favicon.ico
+      globals.css
+      icon.svg
+      layout.tsx
+      page.tsx
+    components/
+      admin/
+        acciones-grid.tsx
+        action-log.tsx
+        resultado-card.tsx
+        resultado-renderers.tsx
+      ui/
+        button.tsx
+        card.tsx
+        empty-state.tsx
+        error-state.tsx
+        input.tsx
+        label.tsx
+        live-status.tsx
+        select.tsx
+        skeleton.tsx
+        table.tsx
+      alerta-item.tsx
+      alertas-feed.tsx
+      atribucion-item.tsx
+      auditoria-chart.tsx
+      coming-soon.tsx
+      estacion-item-lista.tsx
+      estaciones-filtros.tsx
+      estado-ciudad-card.tsx
+      health-footer.tsx
+      mapa-estaciones.tsx
+      nav.tsx
+      protected-route.tsx
+      reporte-card.tsx
+    lib/
+      admin-acciones.ts
+      api.ts
+      auth.tsx
+      colores-aqi.ts
+      format-fuente.ts
+      motivo-fallback.ts
+      severidad-alerta.ts
+      theme.tsx
+      utils.ts
+    types/
+      api.ts
+  .gitignore
+  components.json
+  eslint.config.mjs
+  next.config.ts
+  package.json
+  postcss.config.mjs
+  README.md
+  tsconfig.json
+gateway/
+  scripts/
+    crear-admin.ts
+    rehash-admin.ts
+  src/
+    config/
+      env.ts
+    middlewares/
+      authMiddlewares.test.ts
+      errorHandler.ts
+      rateLimit.test.ts
+      rateLimit.ts
+      requestId.ts
+      requireAuth.ts
+      requireOrigin.ts
+      requireRole.ts
+    routes/
+      admin.test.ts
+      admin.ts
+      api.ts
+      auth.test.ts
+      auth.ts
+      health.ts
+      stream.test.ts
+      stream.ts
+    security/
+      jwt.test.ts
+      jwt.ts
+      password.test.ts
+      password.ts
+      tokens.test.ts
+      tokens.ts
+    services/
+      .gitkeep
+      alertasPoller.test.ts
+      alertasPoller.ts
+      authService.ts
+      engine.ts
+      internalClient.ts
+    app.ts
+    server.ts
+  .dockerignore
+  .env.example
+  .gitignore
+  Dockerfile
+  package.json
+  README.md
+  tsconfig.json
+.gitattributes
+.gitignore
+docker-compose.yml
+LICENSE.txt
+README.md
+
+
+
+
+
+================================================================
+End of Codebase
+================================================================
