@@ -1,5 +1,5 @@
 {
-  "installCommand": "npm install --include=dev",
+  "buildCommand": "echo 'skip build: Vercel transpila api/index.ts on-demand'",
   "functions": {
     "api/index.ts": {
       "maxDuration": 60
