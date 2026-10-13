@@ -2,6 +2,7 @@
 repomix.config.json
 repomix-estructura.xml
 .env
+.env.prod.local
 
 cookies.txt
 login.json
