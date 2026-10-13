@@ -1,5 +1,5 @@
 node_modules/
-dist/
+# dist/ SÍ se commitea (Vercel no compila TypeScript en el build).
 .env
 .env.*
 !.env.example
